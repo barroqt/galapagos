@@ -9,8 +9,6 @@ A spatial evolutionary game theory lab: populations of agents play games
 imitation, selection, and mutation — on a grid and in well-mixed populations.
 Simulation core in Rust (compiled to WASM), interactive frontend in TypeScript.
 
-Development follows [SPECS.md](SPECS.md): one issue at a time, in order.
-
 ## Layout
 
 - `sim-core/` — Rust crate, all simulation logic; compiled to WASM with wasm-pack
@@ -23,15 +21,16 @@ Development follows [SPECS.md](SPECS.md): one issue at a time, in order.
 cd sim-core && cargo test
 
 # Rebuild the WASM package (run after any sim-core change)
-cd web && npm run wasm       # wasm-pack build ../sim-core --target web --out-dir pkg
+cd web && pnpm run wasm      # wasm-pack build ../sim-core --target web --out-dir pkg
 
 # Dev server
-cd web && npm run dev        # binds 0.0.0.0 so the port can be published
+cd web && pnpm run dev       # binds 0.0.0.0 so the port can be published
 
 # Production build (type-checks first)
-cd web && npm run build
+cd web && pnpm run build
 ```
 
 ## Prerequisites
 
-Rust (stable) with the `wasm32-unknown-unknown` target, `wasm-pack`, Node ≥ 20.
+Rust (stable) with the `wasm32-unknown-unknown` target, `wasm-pack`, Node ≥ 20,
+pnpm.

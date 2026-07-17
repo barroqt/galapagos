@@ -3,6 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "packageManager": "pnpm@10.34.5",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
   "scripts": {
     "wasm": "wasm-pack build ../sim-core --target web --out-dir pkg",
     "dev": "vite",

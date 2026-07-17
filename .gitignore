@@ -1,5 +1,5 @@
 target/
 node_modules/
+.pnpm-store/
 sim-core/pkg/
 web/dist/
-SPECS.md
