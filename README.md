@@ -1,13 +1,8 @@
 # Galápagos
 
-*Named after the islands where Darwin observed the variation that became the
-theory of natural selection — this is a lab for watching selection find
-equilibria that game theory predicts.*
-
 A spatial evolutionary game theory lab: populations of agents play games
 (Hawk–Dove, Rock–Paper–Scissors, Stag Hunt, custom), and strategies spread by
-imitation, selection, and mutation — on a grid and in well-mixed populations.
-Simulation core in Rust (compiled to WASM), interactive frontend in TypeScript.
+imitation, selection, and mutation, on a grid and in well-mixed populations.
 
 ## Layout
 
