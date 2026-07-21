@@ -6,9 +6,6 @@
 //! are deliberately *not* re-exported here: the prelude carries vocabulary,
 //! not engines, so importing it can never create a cycle between two
 //! simulations.
-//!
-//! The re-exports land with the types themselves - `crate::types::*` in Task
-//! 1.3. Adding one while its module is empty would only be a glob over nothing
-//! that `unused_imports` rejects.
 
 pub use crate::error::{GameError, SimError};
+pub use crate::types::{Generation, Seed, StrategyId};
