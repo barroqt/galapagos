@@ -264,10 +264,8 @@ pub struct WellMixed {
     /// Target buffer for the synchronous update in 1.9. Sized once, never
     /// grown: an update reads `strategies` and writes here, then the two are
     /// swapped, so no agent sees a half-updated population.
-    #[cfg_attr(not(test), expect(dead_code, reason = "written by the 1.9 update"))]
     next_strategies: Vec<StrategyId>,
     /// Payoff accumulated by each agent during the current generation.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the 1.9 update"))]
     scores: Vec<f64>,
     generation: Generation,
 }
@@ -331,7 +329,10 @@ impl WellMixed {
     /// game does not define. The builder makes that unreachable, and it is
     /// reported rather than ignored because silently scoring such an agent
     /// zero would bias the run in a way no test would catch.
-    #[cfg_attr(not(test), expect(dead_code, reason = "driven by the 1.9 step"))]
+    ///
+    /// Returns [`SimError::NonFiniteScore`] if a total overflows, which needs
+    /// payoffs near `f64::MAX`. Catching it here is what lets the update
+    /// below subtract two scores without ever producing a NaN.
     fn play_matches(&mut self) -> Result<(), SimError> {
         // Destructured so the borrow checker sees the game, the population,
         // the scores and the generator as four disjoint borrows rather than
@@ -378,10 +379,113 @@ impl WellMixed {
                     },
                 )?;
             }
+            if !total.is_finite() {
+                return Err(SimError::NonFiniteScore {
+                    agent,
+                    score: total,
+                });
+            }
             *score = total;
         }
 
         Ok(())
+    }
+
+    /// Applies one round of Fermi pairwise comparison to the whole
+    /// population.
+    ///
+    /// Each agent, in index order, draws one other agent as a model and
+    /// adopts its strategy with probability `1 / (1 + exp(-beta * dPi))`,
+    /// where `dPi` is the model's score minus its own. A better-scoring model
+    /// is copied more often than a worse one, but never with certainty:
+    /// selection here is a bias, not a rule, which is what keeps a finite
+    /// population wandering around its equilibrium instead of locking onto
+    /// it.
+    ///
+    /// The update is synchronous. Every decision reads the population as it
+    /// was at the start of the round and writes into the second buffer, which
+    /// is then swapped in. Updating in place would let a strategy copied
+    /// early in the sweep be copied again later in the same round, so the
+    /// outcome would depend on the order agents happen to sit in the vector.
+    ///
+    /// Exactly two draws are spent per agent, a model and a coin, whatever
+    /// the outcome. Skipping the coin when the model plays the same strategy
+    /// would be free and correct, and would also make the entropy a run
+    /// consumes depend on its own state, which no replay could follow.
+    fn imitate(&mut self) {
+        let Self {
+            rng,
+            strategies,
+            next_strategies,
+            scores,
+            selection_strength,
+            ..
+        } = self;
+        let others = strategies.len() - 1;
+
+        for (agent, next) in next_strategies.iter_mut().enumerate() {
+            let focal = strategies[agent];
+            // Same shift as the matching pass: one draw over the other
+            // agents, mapped past the gap the agent itself leaves.
+            let model_index = match rng.next_index(others) {
+                Some(drawn) if drawn >= agent => drawn + 1,
+                Some(drawn) => drawn,
+                // Unreachable: the builder rejects a population below two, so
+                // there is always another agent to compare against. Keeping
+                // the agent put is the one choice that cannot invent a
+                // strategy or bias a strategy's share.
+                None => {
+                    *next = focal;
+                    continue;
+                }
+            };
+
+            let gap = scores[model_index] - scores[agent];
+            let adopt = rng.next_unit() < fermi(*selection_strength, gap);
+            *next = if adopt {
+                strategies[model_index]
+            } else {
+                focal
+            };
+        }
+
+        // O(1): the two buffers trade places, so neither is ever reallocated
+        // and last generation's population becomes next generation's target.
+        std::mem::swap(&mut self.strategies, &mut self.next_strategies);
+    }
+
+    /// Runs one generation: every agent plays its matches, then the whole
+    /// population updates at once.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the matching pass. The population is left
+    /// untouched if one occurs, since the update never runs.
+    pub fn step(&mut self) -> Result<(), SimError> {
+        self.play_matches()?;
+        self.imitate();
+        self.generation = self.generation.next();
+        Ok(())
+    }
+}
+
+/// Probability of adopting a model's strategy under Fermi pairwise
+/// comparison: `1 / (1 + exp(-beta * gap))`.
+///
+/// Evaluated in whichever of the two algebraically identical forms keeps the
+/// exponent negative, so `exp` is only ever called on a value in `(-inf, 0]`
+/// and returns something in `(0, 1]`. Written directly, an overwhelming gap
+/// would evaluate `exp` to infinity on the way to an answer that is simply 0
+/// or 1, and an infinity that meets another infinity downstream becomes a
+/// NaN, which compares false against every draw and would quietly freeze the
+/// population forever.
+fn fermi(selection_strength: f64, gap: f64) -> f64 {
+    let exponent = selection_strength * gap;
+    if exponent >= 0.0 {
+        1.0 / (1.0 + (-exponent).exp())
+    } else {
+        let weight = exponent.exp();
+        weight / (1.0 + weight)
     }
 }
 
@@ -757,6 +861,212 @@ mod tests {
 
         assert_eq!(left.scores, right.scores);
         assert_ne!(left.scores, other.scores, "a different seed must diverge");
+    }
+
+    #[test]
+    fn an_even_comparison_is_a_coin_flip() {
+        assert_eq!(fermi(1.0, 0.0), 0.5);
+        assert_eq!(fermi(0.0, 100.0), 0.5, "no selection means no preference");
+        assert_eq!(fermi(0.0, -100.0), 0.5);
+    }
+
+    #[test]
+    fn a_better_model_is_likelier_to_be_copied_than_a_worse_one() {
+        let beta = 1.0;
+        assert!(fermi(beta, 1.0) > 0.5);
+        assert!(fermi(beta, -1.0) < 0.5);
+        assert!(fermi(beta, 2.0) > fermi(beta, 1.0), "monotone in the gap");
+        assert!(fermi(beta, 5.0) > fermi(beta, 5.0 - 1e-9));
+    }
+
+    #[test]
+    fn copying_a_model_and_being_copied_are_complementary() {
+        // 1/(1+e^-x) + 1/(1+e^x) = 1 exactly, and the stable form has to
+        // preserve that despite evaluating the two sides by different
+        // branches.
+        for gap in [0.0, 0.5, 3.0, 40.0, 1e6] {
+            let sum = fermi(1.3, gap) + fermi(1.3, -gap);
+            assert!((sum - 1.0).abs() < 1e-12, "gap {gap} summed to {sum}");
+        }
+    }
+
+    #[test]
+    fn an_overwhelming_gap_saturates_instead_of_overflowing() {
+        // The direct form evaluates exp(800), which is infinity. Saturating
+        // at 0 and 1 is the answer that infinity was standing in for; a NaN
+        // here would silently stop every agent from ever imitating.
+        for (beta, gap) in [
+            (1.0, 800.0),
+            (1.0, -800.0),
+            (1e300, 1e300),
+            (1e300, -1e300),
+            (f64::MAX, f64::MAX),
+        ] {
+            let p = fermi(beta, gap);
+            assert!(p.is_finite(), "fermi({beta}, {gap}) = {p}");
+            assert!((0.0..=1.0).contains(&p), "fermi({beta}, {gap}) = {p}");
+            assert_eq!(p, if gap > 0.0 { 1.0 } else { 0.0 });
+        }
+    }
+
+    #[test]
+    fn a_step_advances_the_generation_counter() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 50)
+            .build()
+            .expect("valid configuration");
+
+        assert_eq!(sim.generation(), Generation::ZERO);
+        sim.step().expect("a generation runs");
+        assert_eq!(sim.generation(), Generation::ZERO.next());
+        sim.step().expect("a generation runs");
+        assert_eq!(sim.generation().get(), 2);
+    }
+
+    #[test]
+    fn a_step_never_changes_the_population_size_or_invents_a_strategy() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 128)
+            .seed(Seed::new(11))
+            .build()
+            .expect("valid configuration");
+
+        for _ in 0..25 {
+            sim.step().expect("a generation runs");
+            assert_eq!(sim.population(), 128);
+            assert!(sim.strategies().iter().all(|&s| sim.game().contains(s)));
+        }
+    }
+
+    #[test]
+    fn a_uniform_population_cannot_change_whatever_it_draws() {
+        // Everyone plays dove and scores the same, so every comparison is a
+        // coin flip - but there is nothing else to copy. Any change here
+        // would mean the update invented a strategy.
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 64)
+            .initial_shares(vec![0.0, 1.0])
+            .build()
+            .expect("valid configuration");
+
+        for _ in 0..20 {
+            sim.step().expect("a generation runs");
+        }
+
+        assert!(sim.strategies().iter().all(|&s| s == HawkDove::DOVE));
+    }
+
+    #[test]
+    fn without_selection_a_quarter_of_the_population_turns_over() {
+        // beta = 0 makes every adoption a coin flip, and half the models
+        // carry the other strategy, so about N/4 agents should change. This
+        // is what pins the *number* of decisions: an update that skipped
+        // agents, or decided twice, would miss this band.
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 10_000)
+            .initial_shares(vec![0.5, 0.5])
+            .selection_strength(0.0)
+            .seed(Seed::new(5))
+            .build()
+            .expect("valid configuration");
+        let before = sim.strategies().to_vec();
+
+        sim.step().expect("a generation runs");
+
+        let changed = sim
+            .strategies()
+            .iter()
+            .zip(before.iter())
+            .filter(|(now, then)| now != then)
+            .count();
+        let share = changed as f64 / 10_000.0;
+        assert!(
+            (0.22..0.28).contains(&share),
+            "expected about a quarter of agents to change, got {share}"
+        );
+    }
+
+    #[test]
+    fn strong_selection_spreads_the_dominant_strategy() {
+        // V > C, so fighting pays and hawk beats dove against any opponent.
+        // A rule that copied *worse* neighbours would drive this to zero, so
+        // the direction of the comparison is what is under test here.
+        let mut sim = WellMixedBuilder::new(
+            Game::try_from(HawkDove { v: 6.0, c: 2.0 }).expect("valid game"),
+            500,
+        )
+        .initial_shares(vec![0.5, 0.5])
+        .selection_strength(5.0)
+        .seed(Seed::new(21))
+        .build()
+        .expect("valid configuration");
+
+        for _ in 0..200 {
+            sim.step().expect("a generation runs");
+        }
+
+        let hawks = count_of(&sim, HawkDove::HAWK) as f64 / 500.0;
+        assert!(
+            hawks > 0.95,
+            "hawk should take over when V > C, got {hawks}"
+        );
+    }
+
+    #[test]
+    fn a_step_spends_a_fixed_number_of_draws_whatever_it_decides() {
+        // Matching draws one partner per match; the update draws a model and
+        // a coin per agent, always, even when the outcome is already
+        // determined. A short-circuit anywhere would desync this replay.
+        let population = 30;
+        let matches_per_agent = 2;
+        let mut sim = WellMixedBuilder::new(hawk_dove(), population)
+            .matches_per_agent(matches_per_agent)
+            .seed(Seed::new(88))
+            .build()
+            .expect("valid configuration");
+        let mut reference = Rng::from(Seed::new(88));
+
+        sim.step().expect("a generation runs");
+
+        for _ in 0..population * matches_per_agent {
+            reference.next_index(population - 1);
+        }
+        for _ in 0..population {
+            reference.next_index(population - 1);
+            reference.next_unit();
+        }
+        assert_eq!(sim.rng.next_unit(), reference.next_unit());
+    }
+
+    #[test]
+    fn the_update_reuses_its_buffers_instead_of_reallocating() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 256)
+            .build()
+            .expect("valid configuration");
+        let mut buffers = [sim.strategies.as_ptr(), sim.next_strategies.as_ptr()];
+        buffers.sort_unstable();
+
+        for _ in 0..16 {
+            sim.step().expect("a generation runs");
+        }
+
+        let mut after = [sim.strategies.as_ptr(), sim.next_strategies.as_ptr()];
+        after.sort_unstable();
+        assert_eq!(buffers, after, "the two population buffers must be reused");
+    }
+
+    #[test]
+    fn the_same_seed_replays_a_whole_run() {
+        let run = |seed| {
+            let mut sim = WellMixedBuilder::new(hawk_dove(), 300)
+                .initial_shares(vec![0.4, 0.6])
+                .seed(Seed::new(seed))
+                .build()
+                .expect("valid configuration");
+            for _ in 0..50 {
+                sim.step().expect("a generation runs");
+            }
+            sim.strategies().to_vec()
+        };
+
+        assert_eq!(run(6), run(6));
+        assert_ne!(run(6), run(7));
     }
 
     #[test]

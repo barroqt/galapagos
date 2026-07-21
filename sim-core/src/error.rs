@@ -135,6 +135,18 @@ pub enum SimError {
         strategy_count: usize,
     },
 
+    /// An agent's payoff total is not finite, which takes payoffs near the
+    /// limits of `f64`. Reported rather than carried forward: a comparison
+    /// against an infinite score yields a NaN, and a NaN probability would
+    /// silently stop the population from ever changing again.
+    #[error("agent {agent} scored {score}, which is not a finite payoff")]
+    NonFiniteScore {
+        /// Index of the agent whose total overflowed.
+        agent: usize,
+        /// The total that was computed.
+        score: f64,
+    },
+
     /// The game the simulation would be played on is invalid.
     #[error("invalid game: {0}")]
     Game(#[from] GameError),
