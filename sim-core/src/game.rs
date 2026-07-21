@@ -126,6 +126,58 @@ impl TryFrom<Vec<Vec<f64>>> for Game {
     }
 }
 
+/// The Hawk-Dove game: two animals contest a resource worth `v`, and a fight
+/// between two hawks costs `c`.
+///
+/// Two hawks fight and split the outcome, `(v - c) / 2`. A hawk facing a dove
+/// takes the whole resource, `v`, while the dove retreats with `0`. Two doves
+/// share it, `v / 2`.
+///
+/// # Why the game matters
+///
+/// When `c > v` neither pure strategy is stable: hawks do badly in a
+/// population of hawks, doves do badly against hawks, and the population
+/// settles at a hawk *share* of `v / c` rather than on a single strategy.
+/// That mixed equilibrium is what the simulations in this crate reproduce.
+///
+/// `v > c` is an ordinary game too, not a misconfiguration: fighting simply
+/// pays, hawk dominates, and the population goes to all-hawk. The conversion
+/// deliberately does not reject it.
+///
+/// # Validation
+///
+/// The fields are plain parameters with no constraint of their own, so they
+/// are checked where they become payoffs: [`Game`] rejects any `v`/`c` pair
+/// whose entries are not finite.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HawkDove {
+    /// Value of the contested resource.
+    pub v: f64,
+    /// Cost of losing a fight between two hawks.
+    pub c: f64,
+}
+
+impl HawkDove {
+    /// Escalates and fights. Row and column 0 of the payoff matrix.
+    pub const HAWK: StrategyId = StrategyId::new(0);
+
+    /// Displays and retreats rather than fighting. Row and column 1.
+    pub const DOVE: StrategyId = StrategyId::new(1);
+}
+
+/// Builds the 2x2 Hawk-Dove payoff matrix, laid out row = focal player as
+/// every [`Game`] is.
+impl TryFrom<HawkDove> for Game {
+    type Error = GameError;
+
+    fn try_from(HawkDove { v, c }: HawkDove) -> Result<Self, Self::Error> {
+        //          vs HAWK      vs DOVE
+        // HAWK    (v - c) / 2        v
+        // DOVE              0    v / 2
+        Game::try_from(vec![vec![(v - c) / 2.0, v], vec![0.0, v / 2.0]])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +323,77 @@ mod tests {
                 }
                 other => panic!("expected a non-finite entry error, got {other}"),
             }
+        }
+    }
+
+    #[test]
+    fn hawk_dove_writes_all_four_entries_in_the_right_places() {
+        // V=2, C=4 gives four distinct payoffs (-1, 2, 0, 1), so no pair of
+        // entries can be swapped without the test noticing.
+        let game = Game::try_from(HawkDove { v: 2.0, c: 4.0 }).expect("valid game");
+        let (hawk, dove) = (HawkDove::HAWK, HawkDove::DOVE);
+
+        assert_eq!(game.strategy_count(), 2);
+        assert_eq!(game.payoff(hawk, hawk), Some(-1.0), "H vs H = (V-C)/2");
+        assert_eq!(game.payoff(hawk, dove), Some(2.0), "H vs D = V");
+        assert_eq!(game.payoff(dove, hawk), Some(0.0), "D vs H = 0");
+        assert_eq!(game.payoff(dove, dove), Some(1.0), "D vs D = V/2");
+    }
+
+    #[test]
+    fn hawk_dove_is_not_transposed() {
+        // The asymmetric pair is the whole game: a hawk takes the resource
+        // from a dove, never the other way round. A transposed matrix would
+        // still be square, still be finite, and quietly invert the dynamics.
+        let game = Game::try_from(HawkDove { v: 2.0, c: 4.0 }).expect("valid game");
+        let hawk_over_dove = game
+            .payoff(HawkDove::HAWK, HawkDove::DOVE)
+            .expect("hawk meets dove");
+        let dove_under_hawk = game
+            .payoff(HawkDove::DOVE, HawkDove::HAWK)
+            .expect("dove meets hawk");
+
+        assert!(
+            hawk_over_dove > dove_under_hawk,
+            "hawk must collect V={hawk_over_dove} against a dove, which collects \
+             {dove_under_hawk}"
+        );
+    }
+
+    #[test]
+    fn hawk_is_zero_and_dove_is_one_in_the_game_they_index() {
+        let game = Game::try_from(HawkDove { v: 2.0, c: 4.0 }).expect("valid game");
+        assert_eq!(HawkDove::HAWK.get(), 0);
+        assert_eq!(HawkDove::DOVE.get(), 1);
+        assert!(game.contains(HawkDove::HAWK));
+        assert!(game.contains(HawkDove::DOVE));
+    }
+
+    #[test]
+    fn a_cheap_fight_is_still_a_game() {
+        // V > C: fighting pays, so hawk strictly dominates and the population
+        // goes to all-hawk. That is a real prediction, not a broken input, so
+        // the conversion must accept it.
+        let game = Game::try_from(HawkDove { v: 6.0, c: 2.0 }).expect("V > C is valid");
+        assert_eq!(game.payoff(HawkDove::HAWK, HawkDove::HAWK), Some(2.0));
+        assert!(
+            game.payoff(HawkDove::HAWK, HawkDove::HAWK)
+                > game.payoff(HawkDove::DOVE, HawkDove::HAWK),
+            "hawk dominates when V > C"
+        );
+    }
+
+    #[test]
+    fn hawk_dove_rejects_parameters_that_produce_a_non_finite_payoff() {
+        for (v, c) in [
+            (f64::NAN, 4.0),
+            (2.0, f64::NAN),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::MAX, -f64::MAX),
+        ] {
+            let err = Game::try_from(HawkDove { v, c })
+                .expect_err("non-finite parameters cannot make a game");
+            assert!(matches!(err, GameError::NonFiniteEntry { .. }), "{err}");
         }
     }
 
