@@ -7,6 +7,7 @@
 use crate::game::Game;
 use crate::prelude::*;
 use crate::rng::Rng;
+use std::num::NonZeroUsize;
 
 /// Configuration for a [`WellMixed`] population, validated in [`build`].
 ///
@@ -36,6 +37,7 @@ pub struct WellMixedBuilder {
     initial_shares: Option<Vec<f64>>,
     seed: Seed,
     selection_strength: f64,
+    matches_per_agent: usize,
 }
 
 impl WellMixedBuilder {
@@ -53,6 +55,15 @@ impl WellMixedBuilder {
     /// usually wins a comparison, weak enough to leave visible noise.
     pub const DEFAULT_SELECTION_STRENGTH: f64 = 1.0;
 
+    /// Default number of opponents each agent meets per generation.
+    ///
+    /// A score is a sample of what a strategy earns against the current
+    /// population, and this is how many draws that sample averages over. Too
+    /// few and selection acts mostly on luck; too many and a finite
+    /// population stops differing from the replicator equation, which is the
+    /// contrast Issue 2a exists to show.
+    pub const DEFAULT_MATCHES_PER_AGENT: usize = 10;
+
     /// Starts a configuration for `population` agents playing `game`.
     ///
     /// Neither argument is validated here. `build` is the single place that
@@ -64,6 +75,7 @@ impl WellMixedBuilder {
             initial_shares: None,
             seed: Seed::new(0),
             selection_strength: Self::DEFAULT_SELECTION_STRENGTH,
+            matches_per_agent: Self::DEFAULT_MATCHES_PER_AGENT,
         }
     }
 
@@ -93,6 +105,18 @@ impl WellMixedBuilder {
     /// [`DEFAULT_SELECTION_STRENGTH`]: WellMixedBuilder::DEFAULT_SELECTION_STRENGTH
     pub fn selection_strength(mut self, beta: f64) -> Self {
         self.selection_strength = beta;
+        self
+    }
+
+    /// Sets how many opponents each agent meets per generation. Defaults to
+    /// [`DEFAULT_MATCHES_PER_AGENT`].
+    ///
+    /// Must be at least one: with no matches every score is zero, so nothing
+    /// distinguishes the strategies and the run carries no information.
+    ///
+    /// [`DEFAULT_MATCHES_PER_AGENT`]: WellMixedBuilder::DEFAULT_MATCHES_PER_AGENT
+    pub fn matches_per_agent(mut self, matches: usize) -> Self {
+        self.matches_per_agent = matches;
         self
     }
 
@@ -147,11 +171,15 @@ impl WellMixedBuilder {
             });
         }
 
+        let matches_per_agent =
+            NonZeroUsize::new(self.matches_per_agent).ok_or(SimError::NoMatches)?;
+
         let strategies = allocate_population(self.population, &shares);
 
         Ok(WellMixed {
             game: self.game,
             selection_strength: self.selection_strength,
+            matches_per_agent,
             rng: Rng::from(self.seed),
             next_strategies: strategies.clone(),
             strategies,
@@ -224,9 +252,12 @@ fn allocate_population(population: usize, shares: &[f64]) -> Vec<StrategyId> {
 pub struct WellMixed {
     game: Game,
     selection_strength: f64,
-    /// Drives match-ups and imitation decisions from Task 1.8 onward. Held
-    /// rather than passed in so a run owns its position in the stream.
-    #[cfg_attr(not(test), expect(dead_code, reason = "read by the 1.8 matching pass"))]
+    /// How many opponents each agent meets per generation. `NonZeroUsize`
+    /// because a generation with no matches scores everyone zero, so the
+    /// builder rejects it and nothing below has to consider the case.
+    matches_per_agent: NonZeroUsize,
+    /// Drives match-ups and imitation decisions. Held rather than passed in
+    /// so a run owns its position in the stream.
     rng: Rng,
     /// One strategy per agent; the population itself.
     strategies: Vec<StrategyId>,
@@ -236,10 +267,7 @@ pub struct WellMixed {
     #[cfg_attr(not(test), expect(dead_code, reason = "written by the 1.9 update"))]
     next_strategies: Vec<StrategyId>,
     /// Payoff accumulated by each agent during the current generation.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "written by the 1.8 matching pass")
-    )]
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the 1.9 update"))]
     scores: Vec<f64>,
     generation: Generation,
 }
@@ -269,6 +297,11 @@ impl WellMixed {
         self.generation
     }
 
+    /// Returns how many opponents each agent meets per generation.
+    pub fn matches_per_agent(&self) -> NonZeroUsize {
+        self.matches_per_agent
+    }
+
     /// Returns the strategy each agent currently plays.
     ///
     /// Order is an implementation detail: agents have no identity beyond
@@ -276,6 +309,79 @@ impl WellMixed {
     /// composition of this slice is meaningful.
     pub fn strategies(&self) -> &[StrategyId] {
         &self.strategies
+    }
+
+    /// Plays one generation of matches, writing each agent's total payoff
+    /// into the score buffer.
+    ///
+    /// Every agent initiates exactly `matches_per_agent` matches against
+    /// uniformly drawn opponents, and only the initiator banks the payoff.
+    /// Crediting both sides would give an agent that happened to be drawn
+    /// often a larger total for no reason of its own; with a fixed number of
+    /// matches each, totals are directly comparable, which is exactly what
+    /// the imitation update needs.
+    ///
+    /// The buffer is overwritten rather than added to, so scores never leak
+    /// from one generation into the next, and nothing here allocates: the
+    /// score buffer and the population were sized once at build time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError::UnknownStrategy`] if an agent plays a strategy the
+    /// game does not define. The builder makes that unreachable, and it is
+    /// reported rather than ignored because silently scoring such an agent
+    /// zero would bias the run in a way no test would catch.
+    #[cfg_attr(not(test), expect(dead_code, reason = "driven by the 1.9 step"))]
+    fn play_matches(&mut self) -> Result<(), SimError> {
+        // Destructured so the borrow checker sees the game, the population,
+        // the scores and the generator as four disjoint borrows rather than
+        // one borrow of `self`.
+        let Self {
+            game,
+            rng,
+            strategies,
+            scores,
+            matches_per_agent,
+            ..
+        } = self;
+        let population = strategies.len();
+        let others = population - 1;
+
+        for (agent, (&focal, score)) in
+            strategies.iter().zip(scores.iter_mut()).enumerate()
+        {
+            let row = game.row(focal).ok_or(SimError::UnknownStrategy {
+                strategy: focal.index(),
+                strategy_count: game.strategy_count(),
+            })?;
+
+            let mut total = 0.0;
+            for _ in 0..matches_per_agent.get() {
+                // One draw over the other agents, mapped past the gap left by
+                // the agent itself. Drawing over the whole population and
+                // rejecting self-matches would spend a variable amount of
+                // entropy per match and make replays depend on how often that
+                // happened.
+                let drawn =
+                    rng.next_index(others).ok_or(SimError::PopulationTooSmall {
+                        found: population,
+                        minimum: WellMixed::MIN_POPULATION,
+                    })?;
+                let opponent_index = if drawn >= agent { drawn + 1 } else { drawn };
+                // `drawn < population - 1`, so the shift lands inside the
+                // population and skips `agent` exactly.
+                let opponent = strategies[opponent_index];
+                total += row.get(opponent.index()).copied().ok_or(
+                    SimError::UnknownStrategy {
+                        strategy: opponent.index(),
+                        strategy_count: game.strategy_count(),
+                    },
+                )?;
+            }
+            *score = total;
+        }
+
+        Ok(())
     }
 }
 
@@ -494,6 +600,163 @@ mod tests {
             .selection_strength(0.0)
             .build()
             .expect("zero selection strength is a valid experiment");
+    }
+
+    #[test]
+    fn rejects_a_generation_in_which_nobody_plays() {
+        let err = WellMixedBuilder::new(hawk_dove(), 100)
+            .matches_per_agent(0)
+            .build()
+            .expect_err("a generation with no matches carries no information");
+        assert!(matches!(err, SimError::NoMatches), "{err}");
+    }
+
+    #[test]
+    fn a_uniform_population_scores_the_same_payoff_every_match() {
+        // Every opponent plays dove, so each of the 8 matches pays exactly
+        // D vs D whoever is drawn. The total is then independent of the RNG,
+        // which is what makes this an exact assertion rather than a range.
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 64)
+            .initial_shares(vec![0.0, 1.0])
+            .matches_per_agent(8)
+            .build()
+            .expect("valid configuration");
+        let dove_vs_dove = sim
+            .game()
+            .payoff(HawkDove::DOVE, HawkDove::DOVE)
+            .expect("dove is in the game");
+
+        sim.play_matches().expect("population plays its own game");
+
+        assert!(
+            sim.scores.iter().all(|&s| s == 8.0 * dove_vs_dove),
+            "every agent should score 8 x {dove_vs_dove}, got {:?}",
+            sim.scores
+        );
+    }
+
+    #[test]
+    fn an_agent_never_meets_itself() {
+        // Two agents, one of each strategy. A hawk that could draw itself
+        // would sometimes collect (V-C)/2 = -1 instead of V = 2, so over 200
+        // matches an exact total of 400 is only reachable if self-matching is
+        // impossible rather than merely unlikely.
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 2)
+            .initial_shares(vec![0.5, 0.5])
+            .matches_per_agent(200)
+            .build()
+            .expect("valid configuration");
+
+        sim.play_matches().expect("population plays its own game");
+
+        assert_eq!(sim.strategies(), [HawkDove::HAWK, HawkDove::DOVE]);
+        assert_eq!(sim.scores[0], 200.0 * 2.0, "hawk meets only the dove");
+        assert_eq!(sim.scores[1], 0.0, "dove meets only the hawk");
+    }
+
+    #[test]
+    fn a_lone_hawk_out_scores_every_dove_it_exploits() {
+        // The hawk meets only doves and takes V each time; a dove collects at
+        // most V/2 per match. The gap is what the imitation update in 1.9
+        // acts on, and it also pins the row orientation: a transposed matrix
+        // would reverse this.
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 100)
+            .initial_shares(vec![0.01, 0.99])
+            .matches_per_agent(16)
+            .build()
+            .expect("valid configuration");
+
+        sim.play_matches().expect("population plays its own game");
+
+        let hawk_score = sim.scores[0];
+        assert_eq!(hawk_score, 16.0 * 2.0);
+        assert!(
+            sim.scores[1..].iter().all(|&s| s < hawk_score),
+            "the lone hawk should out-score every dove"
+        );
+    }
+
+    #[test]
+    fn each_generation_replaces_the_previous_scores_rather_than_adding_to_them() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 32)
+            .initial_shares(vec![0.0, 1.0])
+            .matches_per_agent(4)
+            .build()
+            .expect("valid configuration");
+
+        sim.play_matches().expect("first generation");
+        let first: Vec<_> = sim.scores.clone();
+        sim.play_matches().expect("second generation");
+
+        assert_eq!(
+            sim.scores, first,
+            "scores must not accumulate across passes"
+        );
+    }
+
+    #[test]
+    fn matching_reuses_its_buffers_instead_of_reallocating() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 256)
+            .matches_per_agent(4)
+            .build()
+            .expect("valid configuration");
+        let scores_before = sim.scores.as_ptr();
+        let strategies_before = sim.strategies.as_ptr();
+
+        for _ in 0..16 {
+            sim.play_matches().expect("population plays its own game");
+        }
+
+        assert_eq!(scores_before, sim.scores.as_ptr(), "scores buffer moved");
+        assert_eq!(
+            strategies_before,
+            sim.strategies.as_ptr(),
+            "population buffer moved"
+        );
+    }
+
+    #[test]
+    fn matching_spends_exactly_one_draw_per_match_in_a_fixed_order() {
+        // Pins the entropy budget of a generation. If a match ever drew twice
+        // (or a strategy lookup drew at all), the replay would desync here
+        // rather than silently diverging deep into a run.
+        let population = 40;
+        let matches_per_agent = 3;
+        let mut sim = WellMixedBuilder::new(hawk_dove(), population)
+            .matches_per_agent(matches_per_agent)
+            .seed(Seed::new(17))
+            .build()
+            .expect("valid configuration");
+        let mut reference = Rng::from(Seed::new(17));
+
+        sim.play_matches().expect("population plays its own game");
+        for _ in 0..population * matches_per_agent {
+            reference.next_index(population - 1);
+        }
+
+        assert_eq!(sim.rng.next_unit(), reference.next_unit());
+    }
+
+    #[test]
+    fn the_same_seed_scores_the_same_generation() {
+        let build = |seed| {
+            WellMixedBuilder::new(hawk_dove(), 200)
+                .initial_shares(vec![0.5, 0.5])
+                .matches_per_agent(8)
+                .seed(Seed::new(seed))
+                .build()
+                .expect("valid configuration")
+        };
+
+        let mut left = build(9);
+        let mut right = build(9);
+        let mut other = build(10);
+        for sim in [&mut left, &mut right, &mut other] {
+            sim.play_matches().expect("population plays its own game");
+        }
+
+        assert_eq!(left.scores, right.scores);
+        assert_ne!(left.scores, other.scores, "a different seed must diverge");
     }
 
     #[test]

@@ -117,6 +117,24 @@ pub enum SimError {
         value: f64,
     },
 
+    /// A generation in which no agent plays anyone. Every score would be
+    /// zero, so nothing would distinguish the strategies.
+    #[error("each agent must play at least one match per generation")]
+    NoMatches,
+
+    /// An agent plays a strategy the game does not define.
+    ///
+    /// Unreachable through the builder, which sizes the population from the
+    /// game's own strategy count. It is reported rather than ignored because
+    /// quietly scoring such an agent zero would bias a run invisibly.
+    #[error("agent plays strategy {strategy}, but the game has {strategy_count}")]
+    UnknownStrategy {
+        /// The strategy the agent carries.
+        strategy: usize,
+        /// How many strategies the game defines.
+        strategy_count: usize,
+    },
+
     /// The game the simulation would be played on is invalid.
     #[error("invalid game: {0}")]
     Game(#[from] GameError),
