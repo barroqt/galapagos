@@ -7,6 +7,8 @@
 //! not engines, so importing it can never create a cycle between two
 //! simulations.
 //!
-//! The re-exports land with the types themselves - `crate::error::*` in Task
-//! 1.2 and `crate::types::*` in Task 1.3. Adding them now, while both modules
-//! are empty, would only be a glob over nothing that `unused_imports` rejects.
+//! The re-exports land with the types themselves - `crate::types::*` in Task
+//! 1.3. Adding one while its module is empty would only be a glob over nothing
+//! that `unused_imports` rejects.
+
+pub use crate::error::{GameError, SimError};
