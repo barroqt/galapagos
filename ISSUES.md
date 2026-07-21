@@ -5,11 +5,6 @@ teaches one game-theory concept, and each builds on the previous. For the
 timeless description of the product these issues assemble, see
 [SPECS.md](SPECS.md).*
 
-**Cadence - hard stop after every issue.** Development pauses at the end of each
-issue for review and explicit go-ahead before the next begins. Claude writes the
-code and explains each theory/design decision; the reviewer reads closely and
-questions. Split pairs (Na/Nb) are two separate issues with two separate stops.
-
 **Tags - one session, one layer.**
 - **[RUST]** - touches `sim-core/` only. Run from the **repo root**, governed by
   the root `CLAUDE.md`. Never edits `web/`.
@@ -61,6 +56,38 @@ game, why a mixed Nash equilibrium becomes a stable population *share*.
 - **Test:** for V=2, C=4, the long-run hawk share converges to V/C = 0.5 within
   tolerance.
 
+**Tasks:**
+- **1.1** `prelude.rs` + empty modules (`error`, `types`, `game`, `rng`,
+  `wellmixed`); `lib.rs` becomes the WASM boundary and nothing else.
+- **1.2** `error.rs`: `GameError` (not square, bad strategy count, non-finite
+  entry) and `SimError` (population too small, `#[from] GameError`) via
+  `thiserror`. Messages name the offending value.
+- **1.3** `types.rs`: `StrategyId(u8)` - u8 because Issue 3a exposes the grid as
+  `&[u8]` - plus `Seed(u64)` and `Generation(u32)`.
+- **1.4** `game.rs`: `Game` over a flat row-major matrix,
+  `TryFrom<Vec<Vec<f64>>>` validating square / 2+ strategies / finite entries.
+  Row = focal player, documented and consistent.
+- **1.5** `game.rs`: `HawkDove { v, c }` to `Game`, entries (V-C)/2, V, 0, V/2;
+  `HAWK`/`DOVE` consts. V > C is a valid game. Test asserts all four entries and
+  that the matrix is not transposed.
+- **1.6** `rng.rs`: `Rng` over `SmallRng` from `Seed`, exposing only
+  `next_index(len)` and `next_unit()`. No `thread_rng` anywhere in the crate.
+  Test: same seed, same stream.
+- **1.7** `wellmixed.rs`: `WellMixedBuilder` (population, initial shares, seed,
+  selection strength beta) validating in `build`; scratch buffers allocated once.
+- **1.8** matching pass: random pairwise matches accumulating into the reused
+  scores buffer. `matches_per_agent` is a parameter; no per-generation allocation.
+- **1.9** update: Fermi pairwise comparison, `1 / (1 + exp(-beta * dPi))`.
+  Synchronous, one RNG draw per decision in a fixed order, `exp` cannot overflow.
+- **1.10** share history as one flat generation-major `Vec<f64>`; generation 0
+  recorded before the first step, so the ODE overlay starts from the same point.
+- **1.11** `lib.rs`: `WellMixedSim` wasm export, typed errors to `JsError`,
+  history as `Float64Array` with view-vs-copy documented. Leave the placeholder
+  `Sim` in place - `web/` still imports it; it goes in Task 3a.0.
+- **1.12** tests: V/C convergence (V=2, C=4, N=1000, fixed seed, mean of the last
+  200 of 2000 generations within 0.05), a second pair (V=1, C=3) so the test pins
+  the formula not the number, shares sum to 1, same seed reproduces the history.
+
 **Done when:** `cargo test` passes, including the V/C convergence test.
 
 ---
@@ -77,6 +104,22 @@ dynamics, finite-population noise.
   share history, so the UI can overlay them directly).
 - **Test:** for V<C, the ODE converges to the interior equilibrium V/C from any
   interior initial condition, within integration tolerance.
+
+**Tasks:**
+- **2a.1** `replicator.rs`: `fitness(game, x, out)` = `A x` (the exact version of
+  what 1.8 samples) and mean fitness, writing into a caller buffer. Test: hawk and
+  dove fitness are equal at x = V/C.
+- **2a.2** RK4 `step(dt)`, written for n strategies from the start (Issue 4a needs
+  it), all four stage buffers preallocated. Test: halving `dt` cuts the error
+  roughly 16x.
+- **2a.3** staying on the simplex: renormalise vs clamp decided explicitly and
+  documented, since renormalising can mask a `dt` that is far too large. Test over
+  100_000 steps from a near-boundary start.
+- **2a.4** trajectory buffer in the exact layout of 1.10, so the UI overlays two
+  `Float64Array`s with no reshaping; `run(steps, dt)` preallocates.
+- **2a.5** `ReplicatorSim` wasm export alongside `WellMixedSim`, no shared state.
+- **2a.6** tests: converges to V/C from 0.01, 0.3, 0.5, 0.9, 0.99; x=0 and x=1 are
+  fixed points; tolerances tied to `dt` and step count.
 
 **Done when:** `cargo test` passes, including the ODE equilibrium test.
 
@@ -97,6 +140,30 @@ basins of attraction.
   V and C, population size N, initial hawk share, seed - plus play/pause/reset.
 - **Live numeric readouts:** current hawk/dove share and the analytic equilibrium
   value shown precisely alongside the chart.
+
+**Tasks** (start with `pnpm run wasm`):
+- **2b.1 [DECISION]** UI framework and charting library, judged on the real case:
+  a 60fps growing line read from a `Float64Array` with no per-frame allocation,
+  coexisting with a WebGL canvas in 3b. Everything to Issue 7 inherits this.
+- **2b.2** `styles/tokens.css` + `styles/palette.ts`: dark base, warm accents, type
+  and spacing scales. Strategy colours exported in a form the 3b shader can read.
+- **2b.3** app shell + typed module registry (`mount`/`unmount`); `unmount`
+  cancels rAF, removes listeners and frees wasm objects. `main.ts` stops importing
+  the placeholder `Sim`, which unblocks Task 3a.0.
+- **2b.4** `web/src/core/`: the only place importing `sim-core/pkg`. Typed
+  wrappers, an owner and a `dispose()` for every wasm object, view-vs-copy and
+  invalidation documented.
+- **2b.5** driver: play/pause/reset/step-once/steps-per-frame, no allocation in
+  the frame callback, reset rebuilds from the seed rather than mutating state back.
+- **2b.6** share chart reading the flat buffer by stride (no `map`/`slice` per
+  frame), y axis pinned to [0, 1], long runs decimated or windowed.
+- **2b.7** ODE overlay from the same initial share, computed once per parameter
+  change; the generations-to-`dt` mapping is explicit, not tuned by eye.
+- **2b.8** controls with progressive disclosure: curated default (V < C, N large
+  enough to be legible and small enough to be noisy), sliders for V, C, N, initial
+  share, seed. Ranges cannot produce a config the Rust builder rejects.
+- **2b.9** live readouts: current shares, generation, and the analytic V/C, with a
+  defined display for V >= C where no interior equilibrium exists.
 
 **Done when:** moving the V/C sliders visibly moves the convergence level, the ODE
 overlay tracks the simulation, and the module lives in the hub with the default
@@ -121,6 +188,31 @@ cluster formation, why spatial outcomes deviate from well-mixed predictions.
   K steps; for some (V, C) range the spatial hawk share deviates from the
   well-mixed V/C prediction beyond noise.
 
+**Tasks:**
+- **3a.0** delete the placeholder `Sim` from `lib.rs` (2b.3 removed the last UI
+  reference; doing it earlier would have broken `pnpm run build` across a stop).
+  Keep `core_version()`.
+- **3a.1** `grid.rs`: toroidal index + Moore-8 neighbours into a caller-owned
+  `[usize; 8]`, no allocation. Test every edge and corner wraps; reject grids too
+  small to have 8 distinct neighbours.
+- **3a.2** `spatial.rs`: `SpatialBuilder` (width, height, initial shares, noise
+  rate, seed); both grid buffers and the score buffer allocated once. Document the
+  memory cost at 512x512.
+- **3a.3** scoring pass: every cell against its 8 neighbours into the reused score
+  buffer, total payoff, fixed iteration order (3a.4's tie-break depends on it).
+  Test: a uniform grid scores `8 * payoff(s, s)` everywhere.
+- **3a.4** `step()`: synchronous double-buffered unconditional imitation of the
+  best neighbour including itself, explicit deterministic tie-break, then noise
+  `mu` with exactly one RNG draw per cell. In-place update would make the result
+  depend on sweep order.
+- **3a.5** `grid_view() -> &[u8]` zero-copy row-major (this is why `StrategyId` is
+  u8), plus share history in the 1.10 layout. Document what invalidates the view.
+- **3a.6** `set_cell` and `paint(x, y, radius, s)` wrapping on the torus, both
+  validated, neither perturbing the RNG stream.
+- **3a.7** tests: bit-identical grid after 100 steps on a 64x64 grid with the same
+  seed; spatial hawk share deviates from V/C by more than the well-mixed run's own
+  standard deviation, averaged over several seeds.
+
 **Done when:** `cargo test` passes, including reproducibility and
 spatial-deviation tests.
 
@@ -139,9 +231,32 @@ spatial-deviation tests.
 - Side-by-side mode: spatial run and well-mixed run with identical (V, C) - the
   share chart shows both, with **live numeric readouts** for each.
 
+**Tasks** (start with `pnpm run wasm`):
+- **3b.1 [DECISION]** renderer approach: `R8` texture with the palette lookup in
+  the fragment shader vs building RGBA on the CPU (a per-frame pass over 262_144
+  cells); raw WebGL2 vs a thin helper. Quantify bytes per frame for each.
+- **3b.2** grid renderer: one textured quad, `NEAREST` filtering (linear would
+  blend strategy ids into meaningless values), `CLAMP_TO_EDGE`, correct aspect for
+  non-square grids and canvases, real `dispose()`.
+- **3b.3** shaders: palette as a uniform fed from the 2b.2 tokens (no colours
+  hardcoded in GLSL) plus the glow, without blurring cluster boundaries.
+- **3b.4** `texSubImage2D` into a texture allocated once, no per-frame allocation,
+  view re-acquired when WASM memory can have grown. Record the 512x512 frame
+  breakdown across sim step, upload and draw.
+- **3b.5** controls: steps per frame, step-once, seed, and click-to-paint mapping
+  pointer to grid coords (device pixel ratio included), throttled to one call per
+  cell per frame, going through the 3a.6 setter rather than writing the view.
+- **3b.6** side-by-side: one driver advancing both runs, both series on the 2b.6
+  chart, live readouts for each against V/C. State whether the two share a seed.
+
 **Done when:** clusters visibly form, the WebGL renderer holds interactive speed
 at 512×512, and the spatial hawk share measurably differs from the well-mixed V/C
 prediction for some parameter range.
+
+---
+
+*Issues 4a to 7 stay at issue-level scope. Break each into tasks immediately
+before starting it, once Issues 1-3b have settled the shapes it depends on.*
 
 ---
 

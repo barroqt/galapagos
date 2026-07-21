@@ -6,14 +6,15 @@ imitation, selection, and mutation, on a grid and in well-mixed populations.
 
 ## Layout
 
+- `Cargo.toml` — cargo workspace root; all cargo commands run from here
 - `sim-core/` — Rust crate, all simulation logic; compiled to WASM with wasm-pack
 - `web/` — Vite + TypeScript frontend; renders state and forwards controls only
 
 ## Commands
 
 ```bash
-# Rust unit tests (includes theory-vs-simulation assertions)
-cd sim-core && cargo test
+# Rust unit tests (includes theory-vs-simulation assertions), from the repo root
+cargo test
 
 # Rebuild the WASM package (run after any sim-core change)
 cd web && pnpm run wasm      # wasm-pack build ../sim-core --target web --out-dir pkg
