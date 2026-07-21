@@ -42,6 +42,16 @@ pub enum GameError {
         minimum: usize,
     },
 
+    /// More strategies than a `StrategyId` can name, which would leave rows
+    /// of the matrix unreachable rather than merely unused.
+    #[error("payoff matrix has {found} strategies, at most {maximum} can be addressed")]
+    TooManyStrategies {
+        /// Number of strategies the matrix describes.
+        found: usize,
+        /// Largest number of strategies a `StrategyId` can index.
+        maximum: usize,
+    },
+
     /// An entry is NaN or infinite. Such an entry poisons every fitness
     /// average downstream, so it is rejected when the matrix is built.
     #[error("payoff matrix entry at row {row}, column {col} is not finite: {value}")]
