@@ -82,6 +82,41 @@ pub enum SimError {
         minimum: usize,
     },
 
+    /// The initial shares do not describe the game's strategies one for one.
+    #[error("got {found} initial shares for a game with {expected} strategies")]
+    ShareCountMismatch {
+        /// Number of shares supplied.
+        found: usize,
+        /// Number of strategies the game has.
+        expected: usize,
+    },
+
+    /// A share is negative or not finite, so it is not a proportion.
+    #[error("initial share for strategy {strategy} is not a proportion: {value}")]
+    InvalidShare {
+        /// Index of the offending share, which is also its strategy.
+        strategy: usize,
+        /// The value found there.
+        value: f64,
+    },
+
+    /// The shares do not add up to a whole population.
+    #[error("initial shares sum to {sum}, expected 1 to within {tolerance}")]
+    SharesNotNormalised {
+        /// What the supplied shares actually add up to.
+        sum: f64,
+        /// Slack allowed for floating point rounding.
+        tolerance: f64,
+    },
+
+    /// Selection strength is negative or not finite. Zero is allowed: it is
+    /// neutral drift, the baseline selection is measured against.
+    #[error("selection strength must be finite and non-negative, got {value}")]
+    InvalidSelectionStrength {
+        /// The value supplied.
+        value: f64,
+    },
+
     /// The game the simulation would be played on is invalid.
     #[error("invalid game: {0}")]
     Game(#[from] GameError),
