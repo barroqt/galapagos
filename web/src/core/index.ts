@@ -1,42 +1,25 @@
 /**
- * The WASM boundary: the only module in the app allowed to import
- * `sim-core/pkg`. Everything above it consumes the typed wrappers exported
- * here, so there is exactly one place to look for what crosses, what is a copy
- * and what has to be freed.
+ * The WASM boundary.
  *
- * This file starts small on purpose - loading the core and reporting its
- * version is all the shell (2b.3) needs. Task 2b.4 grows it into the owned,
- * disposable wrappers around `WellMixedSim` and `ReplicatorSim`.
- */
-import init, { core_version } from "../../../sim-core/pkg/sim_core";
-
-let loaded = false;
-
-/**
- * Loads and instantiates the WASM core. Safe to call more than once; the
- * second call is a no-op rather than a second instantiation.
+ * The files behind this one are the only place in the app that imports
+ * `sim-core/pkg`; everything above it imports from here. That is what makes
+ * the questions with one answer - what crosses, what is a copy, what has to be
+ * freed - answerable by reading a single directory.
  *
- * Every other export here requires this to have resolved first.
- */
-export async function initCore(): Promise<void> {
-  if (loaded) {
-    return;
-  }
-  await init();
-  loaded = true;
-}
-
-/**
- * The core's version string, for the shell footer - it is how you confirm the
- * browser is running the WASM you just built rather than a cached one.
+ * What crosses, in short:
  *
- * @throws Error if the core has not been loaded yet. wasm-bindgen would throw
- * here anyway, with a message about an undefined import that says nothing
- * about the cause.
+ * - **Parameters** go in as plain numbers ({@link HawkDoveParams}), converted
+ *   to what wasm-bindgen wants at the boundary and validated by `sim-core`,
+ *   which names whatever it rejects.
+ * - **Shares** come back as flat generation-major `Float64Array`s
+ *   ({@link ShareHistory}), read directly and never copied per frame.
+ * - **Runs** are owned objects with a `dispose()`. Nothing in WASM memory is
+ *   collected for you.
  */
-export function coreVersion(): string {
-  if (!loaded) {
-    throw new Error("core: initCore() must resolve before coreVersion()");
-  }
-  return core_version();
-}
+export { CoreError, DisposedError } from "./errors";
+export { ShareHistory } from "./history";
+export { assertCoreLoaded, coreVersion, initCore } from "./init";
+export { Owned } from "./owned";
+export type { HawkDoveParams, TrajectoryParams } from "./params";
+export { ReplicatorTrajectory } from "./replicator";
+export { WellMixedRun } from "./wellmixed";
