@@ -1,0 +1,112 @@
+/*
+ * Design tokens: the whole visual vocabulary of the app, and the only place
+ * raw colour, size or spacing values are written.
+ *
+ * This file declares custom properties and nothing else - no selectors, no
+ * component rules. Anything that styles an element belongs to that component.
+ *
+ * Two deliberate omissions:
+ * - There is no light theme. Galapagos is dark by design (SPECS.md section 8),
+ *   so these are absolute values rather than one half of a pair.
+ * - Strategy colours are not here. They are the one part of the palette that
+ *   canvas 2D, the 3b WebGL shader and CSS all need, so `palette.ts` owns them
+ *   and stamps them onto this element as `--strategy-*` at startup. Declaring
+ *   them in both places is how the shader and the legend drift apart.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---- Surfaces -------------------------------------------------------
+   * A warm basalt ramp, not neutral grey: every step carries a little red and
+   * yellow so the simulations read as light on rock rather than ink on paper.
+   * No pure black - `--surface-base` is the darkest value in the app.
+   */
+  --surface-base: #14120f; /* page background; the surface the palette was validated against */
+  --surface-panel: #1b1815; /* control panels, cards */
+  --surface-raised: #232019; /* inputs, hovered rows, the raised edge of a control */
+  --surface-inset: #100e0c; /* wells: chart and canvas backgrounds, sunk below the page */
+
+  /* ---- Lines ---------------------------------------------------------- */
+  --line-hairline: #2b271f; /* panel edges and dividers; barely there on purpose */
+  --line-strong: #3a352b; /* the edge of an interactive control */
+
+  /* ---- Ink ------------------------------------------------------------
+   * Warm off-white rather than #fff: pure white on this base glares and
+   * competes with the series colours, which are what should glow.
+   * Contrast against `--surface-base`: 15.3:1, 7.8:1, 4.8:1.
+   */
+  --ink-primary: #f0e7d8; /* headings, values, anything read closely */
+  --ink-secondary: #b2a693; /* labels, prose, axis numbers */
+  --ink-muted: #8a7f70; /* units, hints, disabled - clears 4.5:1, so it stays legible */
+
+  /* ---- Accent ---------------------------------------------------------
+   * One warm accent for interactive chrome: focus, active toggles, slider
+   * fill. Kept lighter than the gold strategy slot so an accent never reads
+   * as a series. 9.6:1 on the base.
+   */
+  --accent: #e8b04b;
+  --accent-dim: #8f6c2c; /* rails, inactive halves of a control */
+  --accent-ink: #1a1508; /* text drawn on top of --accent */
+
+  /* ---- Chart chrome ---------------------------------------------------
+   * Recessive by rule: grid and axes must never compete with the data. These
+   * are the CSS side; the canvas chart reads the same roles through
+   * getComputedStyle once per resize, not per frame.
+   */
+  --chart-grid: #241f19;
+  --chart-axis: #3a352b;
+  --chart-label: var(--ink-muted);
+
+  /* ---- State ---------------------------------------------------------- */
+  --focus-ring: #e8b04b;
+  --danger: #e4633a; /* invalid input; shares the ember hue but always ships with text */
+
+  /* ---- Type -----------------------------------------------------------
+   * System stack: no webfont request, and every target platform here is a
+   * desktop with a good UI face. The mono stack exists for numbers - live
+   * readouts change every frame, and tabular figures stop them jittering.
+   */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+
+  --text-xs: 0.6875rem; /* 11px - micro labels, axis ticks */
+  --text-sm: 0.8125rem; /* 13px - control labels, legends */
+  --text-base: 0.9375rem; /* 15px - body */
+  --text-lg: 1.125rem; /* 18px - module title */
+  --text-xl: 1.5rem; /* 24px - hub headings */
+  --text-2xl: 2rem; /* 32px - the one hero number per module */
+
+  --leading-tight: 1.2; /* headings and readouts */
+  --leading-normal: 1.55; /* the little prose there is */
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  --tracking-label: 0.08em; /* uppercase micro labels only */
+
+  /* ---- Space ----------------------------------------------------------
+   * A 4px grid. Every margin, padding and gap in the app is one of these.
+   */
+  --space-1: 0.25rem; /* 4px */
+  --space-2: 0.5rem; /* 8px */
+  --space-3: 0.75rem; /* 12px */
+  --space-4: 1rem; /* 16px */
+  --space-6: 1.5rem; /* 24px */
+  --space-8: 2rem; /* 32px */
+  --space-12: 3rem; /* 48px */
+  --space-16: 4rem; /* 64px */
+
+  /* ---- Radius ---------------------------------------------------------- */
+  --radius-sm: 3px; /* inputs, swatches */
+  --radius-md: 6px; /* panels, buttons */
+  --radius-lg: 10px; /* module cards in the hub */
+
+  /* ---- Elevation and glow ---------------------------------------------
+   * Panels sit with a soft shadow; only the data glows, and that glow is
+   * drawn into the canvas rather than applied as a CSS filter.
+   */
+  --shadow-panel: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px rgb(0 0 0 / 0.25);
+  --shadow-inset: inset 0 1px 0 rgb(255 255 255 / 0.03);
+}
