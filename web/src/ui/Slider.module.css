@@ -1,0 +1,85 @@
+.slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.label {
+  font-size: var(--text-sm);
+  color: var(--ink-secondary);
+}
+
+.value {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-primary);
+}
+
+.hint {
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+/* The native control, restyled rather than replaced: keyboard support, page
+   up/down, and the drag behaviour all come free and all have to keep working. */
+.input {
+  width: 100%;
+  height: 1rem;
+  margin: 0;
+  appearance: none;
+  background: none;
+  cursor: pointer;
+}
+
+.input::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--fill),
+    var(--line-strong) var(--fill)
+  );
+}
+
+.input::-moz-range-track {
+  height: 3px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--accent) var(--fill),
+    var(--line-strong) var(--fill)
+  );
+}
+
+.input::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border-radius: 50%;
+  background: var(--ink-primary);
+}
+
+.input::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: var(--ink-primary);
+}
+
+.input:hover::-webkit-slider-thumb {
+  background: var(--accent);
+}
+
+.input:hover::-moz-range-thumb {
+  background: var(--accent);
+}

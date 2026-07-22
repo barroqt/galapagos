@@ -1,10 +1,9 @@
 /**
  * The Hawk-Dove module: an agent-based population playing the game live, with
- * the analytic replicator trajectory overlaid on the same chart.
+ * the analytic replicator trajectory overlaid on the same chart, and the
+ * parameters behind a disclosure.
  *
- * This is the frame plus the run driver. The share chart lands in the stage in
- * 2b.6, the full parameter panel replaces the transport controls in the rail
- * in 2b.8, and the readout strip becomes the proper live numbers in 2b.9.
+ * The readout strip becomes the proper live numbers in 2b.9.
  */
 import {
   createMemo,
@@ -15,14 +14,13 @@ import {
   type JSX,
 } from "solid-js";
 import { ShareChart } from "../../charts/shareChart";
-import {
-  ReplicatorTrajectory,
-  WellMixedRun,
-  type HawkDoveParams,
-} from "../../core";
+import { ReplicatorTrajectory, WellMixedRun } from "../../core";
 import { RunDriver } from "../../sim/driver";
-import { dtPerGeneration, type TimeMappingParams } from "../../sim/timeMapping";
+import { dtPerGeneration } from "../../sim/timeMapping";
 import { strategySeries } from "../../styles/palette";
+import { Disclosure } from "../../ui/Disclosure";
+import { Slider } from "../../ui/Slider";
+import { DEFAULT_PARAMS, RANGES } from "./parameters";
 import styles from "./HawkDoveModule.module.css";
 
 /**
@@ -33,31 +31,11 @@ const HAWK = 0;
 const DOVE = 1;
 
 /**
- * The curated default. 2b.8 puts these under the sliders.
- *
- * - `V < C`, so there is an interior equilibrium at `V/C = 0.5` to converge to.
- * - The run starts at 90% hawks, away from that equilibrium, because a run
- *   that starts on the answer has nothing to show. Hawks dominant, fighting
- *   costly, and the share falls back to half: that is the whole idea in one
- *   curve.
- * - 500 agents: enough that the trend is legible, few enough that the noise a
- *   finite population makes is visible against the analytic curve.
- * - Selection strength 0.05 over 10 matches keeps `beta * m * dPi` at or below
- *   0.5, which is the weak-selection regime where the replicator equation is
- *   the run's deterministic limit. See `sim/timeMapping.ts`: this is the
- *   parameter that decides whether the overlay is a prediction or a decoration.
+ * ODE time per generation. Constant, because it depends only on selection
+ * strength and matches per agent, and neither is under a slider: they set
+ * whether the run is in the regime the overlay is valid in, which is not a
+ * knob to hand over without the explanation that goes with it.
  */
-const DEFAULT_PARAMS: HawkDoveParams & TimeMappingParams = {
-  v: 2,
-  c: 4,
-  population: 500,
-  initialHawkShare: 0.9,
-  seed: 42,
-  selectionStrength: 0.05,
-  matchesPerAgent: 10,
-};
-
-/** ODE time per generation, derived from the parameters above. */
 const DT = dtPerGeneration(DEFAULT_PARAMS);
 
 /** Generations of trajectory to have ready before the run needs them. */
@@ -77,13 +55,15 @@ export function HawkDoveModule(): JSX.Element {
   let canvas: HTMLCanvasElement | undefined;
   let chart: ShareChart | null = null;
   const [overlayFailure, setOverlayFailure] = createSignal<string | null>(null);
+  const [params, setParams] = createSignal(DEFAULT_PARAMS);
 
   /**
-   * The analytic overlay. Built once, from the same V, C and starting share as
-   * the run, and integrated ahead of it rather than recomputed per frame: it
-   * is deterministic, so a reset does not change it and neither does a step.
+   * The analytic overlay. Built once per parameter change, from the same V, C
+   * and starting share as the run, and integrated ahead of it rather than
+   * recomputed per frame: it is deterministic, so neither a step nor a reset
+   * changes it.
    */
-  const trajectory = ReplicatorTrajectory.create(DEFAULT_PARAMS);
+  let trajectory = ReplicatorTrajectory.create(DEFAULT_PARAMS);
   let horizonFailed = false;
 
   /**
@@ -110,7 +90,7 @@ export function HawkDoveModule(): JSX.Element {
   };
 
   const driver = new RunDriver({
-    create: () => WellMixedRun.create(DEFAULT_PARAMS),
+    create: () => WellMixedRun.create(params()),
     // One arrow, created with the driver: the chart is looked up from a field
     // rather than closed over, because it does not exist until the canvas is
     // in the document.
@@ -136,9 +116,43 @@ export function HawkDoveModule(): JSX.Element {
     trajectory.dispose();
   });
 
+  /**
+   * Applies one changed parameter: the trajectory is rebuilt for the new game
+   * and the run is rebuilt from the seed.
+   *
+   * Both models restart, because neither can be steered mid-flight - a run's
+   * agents are already playing the old payoff matrix, and pretending otherwise
+   * would show a curve that no single game produced. The new trajectory is
+   * built before the old one is freed, so a rejected configuration leaves the
+   * chart showing the last valid one.
+   */
+  const change = <Key extends keyof typeof DEFAULT_PARAMS>(
+    key: Key,
+    value: (typeof DEFAULT_PARAMS)[Key],
+  ): void => {
+    const next = { ...params(), [key]: value };
+    setParams(next);
+    try {
+      const fresh = ReplicatorTrajectory.create(next);
+      trajectory.dispose();
+      trajectory = fresh;
+      horizonFailed = false;
+      setOverlayFailure(null);
+      extendTrajectory(0);
+    } catch (error) {
+      setOverlayFailure(error instanceof Error ? error.message : String(error));
+    }
+    driver.reset();
+  };
+
   const shareOf = (strategy: number): number => {
     driver.generation();
     return driver.run().history.latest(strategy);
+  };
+  /** What the run is configured with, for the closed parameter panel. */
+  const configuration = (): string => {
+    const current = params();
+    return `V ${current.v.toFixed(1)} · C ${current.c.toFixed(1)} · N ${current.population} · seed ${current.seed}`;
   };
   const failure = createMemo(() => {
     const error = driver.error();
@@ -205,6 +219,53 @@ export function HawkDoveModule(): JSX.Element {
               ))}
             </div>
           </div>
+
+          <Disclosure summary="Parameters" detail={configuration()}>
+            <Slider
+              label="Resource value V"
+              value={params().v}
+              min={RANGES.v.min}
+              max={RANGES.v.max}
+              step={RANGES.v.step}
+              format={(value) => value.toFixed(1)}
+              onInput={(value) => change("v", value)}
+            />
+            <Slider
+              label="Fight cost C"
+              value={params().c}
+              min={RANGES.c.min}
+              max={RANGES.c.max}
+              step={RANGES.c.step}
+              format={(value) => value.toFixed(1)}
+              onInput={(value) => change("c", value)}
+            />
+            <Slider
+              label="Population N"
+              value={params().population}
+              min={RANGES.population.min}
+              max={RANGES.population.max}
+              step={RANGES.population.step}
+              onInput={(value) => change("population", value)}
+            />
+            <Slider
+              label="Starting hawks"
+              value={params().initialHawkShare}
+              min={RANGES.initialHawkShare.min}
+              max={RANGES.initialHawkShare.max}
+              step={RANGES.initialHawkShare.step}
+              format={(value) => `${Math.round(value * 100)}%`}
+              onInput={(value) => change("initialHawkShare", value)}
+            />
+            <Slider
+              label="Seed"
+              value={params().seed}
+              min={RANGES.seed.min}
+              max={RANGES.seed.max}
+              step={RANGES.seed.step}
+              hint="The same seed and parameters replay the same run."
+              onInput={(value) => change("seed", value)}
+            />
+          </Disclosure>
         </aside>
       </div>
 

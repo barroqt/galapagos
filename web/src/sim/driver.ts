@@ -184,8 +184,17 @@ export class RunDriver<T extends DrivenRun> {
     }
     const playing = this.#playback() === "playing";
     this.pause();
+    // Built before the old one is freed: `create` takes user-supplied
+    // parameters, and a rejected set must leave the driver holding the run it
+    // already had rather than a freed one.
+    let fresh: T;
+    try {
+      fresh = this.#options.create();
+    } catch (error) {
+      this.#setError(error);
+      return;
+    }
     this.#run().dispose();
-    const fresh = this.#options.create();
     this.#setRun(fresh);
     this.#setGeneration(fresh.generation);
     this.#setError(null);
