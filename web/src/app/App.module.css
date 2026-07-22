@@ -1,0 +1,61 @@
+/* Sized against the viewport rather than a percentage chain through the mount
+   point, so a module's stage can claim the height that is left over. */
+.app {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+.header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-8);
+  height: 3.5rem;
+  border-bottom: 1px solid var(--line-hairline);
+  background: var(--surface-base);
+}
+
+.wordmark {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.01em;
+}
+
+/* The wordmark is a heading at the hub and the way back once a module is
+   open. Both spellings look identical; only one of them is clickable. */
+.wordmarkText {
+  color: var(--ink-primary);
+}
+
+button.wordmarkText:hover {
+  color: var(--accent);
+}
+
+.crumb {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-base);
+  color: var(--ink-secondary);
+}
+
+.crumbMark {
+  color: var(--ink-muted);
+}
+
+.headerSpacer {
+  flex: 1;
+}
+
+.version {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+.main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}

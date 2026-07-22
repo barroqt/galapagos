@@ -1,0 +1,66 @@
+/*
+ * Element defaults: the reset and the handful of bare-element rules the whole
+ * app inherits. Everything with a class name lives in a component's own
+ * `.module.css` next to it.
+ *
+ * Values come from `tokens.css` without exception - if a number appears here
+ * that is not a token, it is either a reset or a bug.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--surface-base);
+  color: var(--ink-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  /* Dark type needs to stay thin: synthetic weight closes counters at 13px. */
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: var(--weight-semibold);
+  line-height: var(--leading-tight);
+}
+
+p {
+  margin: 0;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+/*
+ * One focus style for the whole app, and only for keyboard focus: a warm ring
+ * that does not move anything, since UI chrome here does not animate.
+ */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+::selection {
+  background: var(--accent-dim);
+  color: var(--ink-primary);
+}
