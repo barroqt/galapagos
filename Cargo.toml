@@ -7,3 +7,9 @@ resolver = "2"
 [profile.release]
 opt-level = 3
 lto = true
+
+# Tests build optimised: the Issue 1 convergence run is 2000 generations of
+# 1000 agents, and unoptimised that dominates the TDD loop the project runs on
+# (`cargo watch -x "test -q"`). Debug assertions and overflow checks stay on.
+[profile.test]
+opt-level = 2
