@@ -20,6 +20,7 @@ import { dtPerGeneration } from "../../sim/timeMapping";
 import { strategySeries } from "../../styles/palette";
 import { Disclosure } from "../../ui/Disclosure";
 import { Slider } from "../../ui/Slider";
+import { hawkDoveEquilibrium } from "./equilibrium";
 import { DEFAULT_PARAMS, RANGES } from "./parameters";
 import styles from "./HawkDoveModule.module.css";
 
@@ -149,6 +150,11 @@ export function HawkDoveModule(): JSX.Element {
     driver.generation();
     return driver.run().history.latest(strategy);
   };
+  /** What theory predicts for the current game. */
+  const equilibrium = createMemo(() =>
+    hawkDoveEquilibrium(params().v, params().c),
+  );
+
   /** What the run is configured with, for the closed parameter panel. */
   const configuration = (): string => {
     const current = params();
@@ -281,9 +287,23 @@ export function HawkDoveModule(): JSX.Element {
           value={shareOf(DOVE).toFixed(3)}
           color={strategySeries(DOVE).hex}
         />
+
         <Show when={failure()}>
           {(message) => <p class={styles.failure}>{message()}</p>}
         </Show>
+
+        {/* What theory predicts, set apart from what the run is doing. */}
+        <div class={styles.prediction}>
+          <Readout
+            label="Equilibrium"
+            value={equilibrium().hawkShare.toFixed(3)}
+            note={
+              equilibrium().kind === "mixed"
+                ? "hawks at V/C"
+                : "all hawks: V ≥ C, no interior equilibrium"
+            }
+          />
+        </div>
       </footer>
     </section>
   );
@@ -292,7 +312,10 @@ export function HawkDoveModule(): JSX.Element {
 interface ReadoutProps {
   readonly label: string;
   readonly value: string;
+  /** A colour swatch before the label, tying the number to its series. */
   readonly color?: string;
+  /** One line under the value, for what the number means. */
+  readonly note?: string;
 }
 
 function Readout(props: ReadoutProps): JSX.Element {
@@ -307,6 +330,9 @@ function Readout(props: ReadoutProps): JSX.Element {
         {props.label}
       </p>
       <p class={styles.readoutValue}>{props.value}</p>
+      <Show when={props.note}>
+        {(note) => <p class={styles.readoutNote}>{note()}</p>}
+      </Show>
     </div>
   );
 }

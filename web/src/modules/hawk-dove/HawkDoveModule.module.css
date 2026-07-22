@@ -144,9 +144,11 @@
   box-shadow: inset 0 -2px 0 var(--accent);
 }
 
+/* Aligned to the top, so every label sits on one line whether or not its
+   readout carries a note underneath. */
 .readouts {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-8);
   padding: var(--space-4);
   background: var(--surface-panel);
@@ -180,14 +182,29 @@
   color: var(--ink-primary);
 }
 
+.readoutNote {
+  font-size: var(--text-xs);
+  color: var(--ink-muted);
+}
+
+/* Theory, set apart from measurement: the predicted equilibrium sits after a
+   rule, so it is not read as another live number off the run. */
+.prediction {
+  margin-left: auto;
+  padding-left: var(--space-8);
+  border-left: 1px solid var(--line-strong);
+}
+
 .swatch {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 50%;
 }
 
+/* Sits with the live numbers rather than at the far edge: the prediction
+   block is what holds the right-hand position. */
 .failure {
-  margin-left: auto;
+  max-width: 32rem;
   font-size: var(--text-sm);
   color: var(--danger);
 }
