@@ -176,7 +176,7 @@ impl WellMixedBuilder {
 
         let strategies = allocate_population(self.population, &shares);
 
-        Ok(WellMixed {
+        let mut sim = WellMixed {
             game: self.game,
             selection_strength: self.selection_strength,
             matches_per_agent,
@@ -184,8 +184,14 @@ impl WellMixedBuilder {
             next_strategies: strategies.clone(),
             strategies,
             scores: vec![0.0; self.population],
+            history: Vec::new(),
             generation: Generation::ZERO,
-        })
+        };
+        // Generation 0 is the population as configured, recorded before
+        // anything runs so a run and its analytic overlay start from the same
+        // point rather than one generation apart.
+        sim.record_shares()?;
+        Ok(sim)
     }
 }
 
@@ -265,8 +271,12 @@ pub struct WellMixed {
     /// grown: an update reads `strategies` and writes here, then the two are
     /// swapped, so no agent sees a half-updated population.
     next_strategies: Vec<StrategyId>,
-    /// Payoff accumulated by each agent during the current generation.
+    /// Payoff each agent collected during the current generation. Overwritten
+    /// in full by every matching pass, never accumulated across generations.
     scores: Vec<f64>,
+    /// Strategy shares per generation, generation-major and flat. See
+    /// [`WellMixed::share_history`] for the layout and why it is one buffer.
+    history: Vec<f64>,
     generation: Generation,
 }
 
@@ -465,6 +475,97 @@ impl WellMixed {
         self.play_matches()?;
         self.imitate();
         self.generation = self.generation.next();
+        self.record_shares()
+    }
+
+    /// Returns the strategy shares of every generation so far, flat and
+    /// generation-major: generation `g`'s shares are the `strategy_count`
+    /// entries starting at `g * strategy_count`.
+    ///
+    /// One flat buffer rather than a vector of rows because this crosses to
+    /// JS as a single `Float64Array` view. A nested shape would mean an
+    /// object per generation and a copy per frame; a strategy-major layout
+    /// would mean the UI could not append a generation without moving
+    /// everything after it.
+    ///
+    /// The replicator trajectory in Issue 2a uses this exact layout, so the
+    /// two can be plotted against each other without reshaping either.
+    ///
+    /// It always holds at least generation 0, which is recorded at build
+    /// time, and it grows by one row per [`step`]. Growth is amortised the
+    /// way a `Vec` grows, so a step allocates only occasionally, and never
+    /// touches the buffers the matching and update passes use.
+    ///
+    /// [`step`]: WellMixed::step
+    pub fn share_history(&self) -> &[f64] {
+        &self.history
+    }
+
+    /// Returns how many generations are recorded, which is one more than the
+    /// number of steps run.
+    pub fn recorded_generations(&self) -> usize {
+        // Exact: the history only ever grows by whole rows.
+        self.history.len() / self.game.strategy_count()
+    }
+
+    /// Returns one generation's shares, or `None` if that generation has not
+    /// run yet.
+    pub fn shares_at(&self, generation: Generation) -> Option<&[f64]> {
+        let strategy_count = self.game.strategy_count();
+        let base = generation.index().checked_mul(strategy_count)?;
+        self.history.get(base..base.checked_add(strategy_count)?)
+    }
+
+    /// Returns the shares of the current generation.
+    ///
+    /// Always `strategy_count` entries: generation 0 is recorded before the
+    /// first step, so there is never a moment with no current shares.
+    pub fn current_shares(&self) -> &[f64] {
+        self.history
+            .rchunks_exact(self.game.strategy_count())
+            .next()
+            .unwrap_or(&[])
+    }
+
+    /// Appends the current population's shares to the history.
+    ///
+    /// Counts are accumulated directly into the new row rather than into a
+    /// scratch buffer that would then be copied, and the row is divided
+    /// through once at the end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SimError::UnknownStrategy`] if an agent plays a strategy the
+    /// game does not define. Checked before the row is appended, so a failed
+    /// recording cannot leave a half-written generation in the history.
+    fn record_shares(&mut self) -> Result<(), SimError> {
+        let Self {
+            game,
+            strategies,
+            history,
+            ..
+        } = self;
+        let strategy_count = game.strategy_count();
+
+        if let Some(unknown) = strategies.iter().find(|&&s| !game.contains(s)) {
+            return Err(SimError::UnknownStrategy {
+                strategy: unknown.index(),
+                strategy_count,
+            });
+        }
+
+        let base = history.len();
+        history.resize(base + strategy_count, 0.0);
+        let row = &mut history[base..];
+        for &strategy in strategies.iter() {
+            // In range: every strategy was checked against the game above.
+            row[strategy.index()] += 1.0;
+        }
+
+        let population = strategies.len() as f64;
+        for share in row.iter_mut() {
+            *share /= population;
+        }
         Ok(())
     }
 }
@@ -1067,6 +1168,133 @@ mod tests {
 
         assert_eq!(run(6), run(6));
         assert_ne!(run(6), run(7));
+    }
+
+    #[test]
+    fn generation_zero_is_recorded_before_anything_runs() {
+        // The analytic overlay in 2a starts from the initial share, so the
+        // two curves have to begin at the same point rather than one
+        // generation apart.
+        let sim = WellMixedBuilder::new(hawk_dove(), 1_000)
+            .initial_shares(vec![0.3, 0.7])
+            .build()
+            .expect("valid configuration");
+
+        assert_eq!(sim.recorded_generations(), 1);
+        assert_eq!(sim.share_history(), [0.3, 0.7]);
+        assert_eq!(sim.current_shares(), [0.3, 0.7]);
+    }
+
+    #[test]
+    fn each_step_appends_exactly_one_row() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 100)
+            .build()
+            .expect("valid configuration");
+
+        for expected in 1..=10 {
+            sim.step().expect("a generation runs");
+            assert_eq!(sim.recorded_generations(), expected + 1);
+            assert_eq!(sim.share_history().len(), (expected + 1) * 2);
+        }
+    }
+
+    #[test]
+    fn the_history_is_generation_major() {
+        // The UI reads this buffer by stride, so row g must be the contiguous
+        // run at g * strategy_count. A strategy-major layout would still have
+        // the right length and the right sums, and would draw nonsense.
+        let mut sim = WellMixedBuilder::new(three_strategy_game(), 90)
+            .initial_shares(vec![1.0, 0.0, 0.0])
+            .seed(Seed::new(4))
+            .build()
+            .expect("valid configuration");
+        for _ in 0..5 {
+            sim.step().expect("a generation runs");
+        }
+
+        let strategy_count = 3;
+        for generation in 0..sim.recorded_generations() {
+            let row = sim
+                .shares_at(Generation::new(generation as u32))
+                .expect("recorded generation");
+            let base = generation * strategy_count;
+            assert_eq!(row, &sim.share_history()[base..base + strategy_count]);
+        }
+        // Nothing can invade a payoff-free game, so the run stays put and the
+        // first row is recognisable wherever it is stored.
+        assert_eq!(
+            sim.shares_at(Generation::ZERO),
+            Some([1.0, 0.0, 0.0].as_slice())
+        );
+    }
+
+    #[test]
+    fn every_recorded_generation_is_a_distribution() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 777)
+            .initial_shares(vec![0.5, 0.5])
+            .seed(Seed::new(19))
+            .build()
+            .expect("valid configuration");
+        for _ in 0..60 {
+            sim.step().expect("a generation runs");
+        }
+
+        for (generation, row) in sim.share_history().chunks_exact(2).enumerate() {
+            let sum: f64 = row.iter().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-12,
+                "generation {generation} sums to {sum}"
+            );
+            assert!(row.iter().all(|&s| (0.0..=1.0).contains(&s)));
+        }
+    }
+
+    #[test]
+    fn the_last_row_is_the_population_as_it_stands() {
+        let mut sim = WellMixedBuilder::new(hawk_dove(), 400)
+            .initial_shares(vec![0.5, 0.5])
+            .seed(Seed::new(23))
+            .build()
+            .expect("valid configuration");
+        for _ in 0..30 {
+            sim.step().expect("a generation runs");
+        }
+
+        let hawks = count_of(&sim, HawkDove::HAWK) as f64 / 400.0;
+        assert_eq!(sim.current_shares(), [hawks, 1.0 - hawks]);
+        assert_eq!(
+            sim.shares_at(sim.generation()),
+            Some(sim.current_shares()),
+            "the current shares are the row for the current generation"
+        );
+    }
+
+    #[test]
+    fn a_generation_that_has_not_run_has_no_row() {
+        let sim = WellMixedBuilder::new(hawk_dove(), 10)
+            .build()
+            .expect("valid configuration");
+
+        assert_eq!(sim.shares_at(Generation::new(1)), None);
+        assert_eq!(sim.shares_at(Generation::new(9_999)), None);
+    }
+
+    #[test]
+    fn the_same_seed_replays_the_same_history() {
+        let run = |seed| {
+            let mut sim = WellMixedBuilder::new(hawk_dove(), 250)
+                .initial_shares(vec![0.45, 0.55])
+                .seed(Seed::new(seed))
+                .build()
+                .expect("valid configuration");
+            for _ in 0..40 {
+                sim.step().expect("a generation runs");
+            }
+            sim.share_history().to_vec()
+        };
+
+        assert_eq!(run(31), run(31));
+        assert_ne!(run(31), run(32));
     }
 
     #[test]
