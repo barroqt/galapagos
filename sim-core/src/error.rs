@@ -82,8 +82,8 @@ pub enum SimError {
         minimum: usize,
     },
 
-    /// The initial shares do not describe the game's strategies one for one.
-    #[error("got {found} initial shares for a game with {expected} strategies")]
+    /// A set of shares does not describe the game's strategies one for one.
+    #[error("got {found} shares for a game with {expected} strategies")]
     ShareCountMismatch {
         /// Number of shares supplied.
         found: usize,
@@ -145,6 +145,38 @@ pub enum SimError {
         agent: usize,
         /// The total that was computed.
         score: f64,
+    },
+
+    /// The integration step is not a positive, finite length of time.
+    ///
+    /// Zero is rejected along with the negatives: a step of no time is not an
+    /// error the caller can see the consequences of, it is a `run` that
+    /// silently records the same state over and over.
+    #[error("time step must be finite and positive, got {value}")]
+    InvalidTimeStep {
+        /// The value supplied.
+        value: f64,
+    },
+
+    /// An integrated state left the simplex by more than rounding explains,
+    /// which means the time step is too large for this game.
+    ///
+    /// Reported rather than repaired. The replicator equation cannot take a
+    /// share out of `[0, 1]`, so an integrator that does has taken a step its
+    /// truncation error cannot cover, and renormalising it back would hand
+    /// the caller a plausible-looking curve that is not a solution of
+    /// anything.
+    #[error(
+        "share for strategy {strategy} left the simplex at {value} after a step of \
+         {time_step}: the time step is too large for this game"
+    )]
+    LeftTheSimplex {
+        /// Index of the offending share, which is also its strategy.
+        strategy: usize,
+        /// The value it reached.
+        value: f64,
+        /// The step that took it there, which is what has to shrink.
+        time_step: f64,
     },
 
     /// The game the simulation would be played on is invalid.
@@ -209,6 +241,27 @@ mod tests {
         }
         .to_string();
         assert!(msg.contains('1'), "{msg}");
+        assert!(msg.contains('2'), "{msg}");
+    }
+
+    #[test]
+    fn an_invalid_time_step_names_the_value() {
+        let msg = SimError::InvalidTimeStep { value: -0.5 }.to_string();
+        assert!(msg.contains("-0.5"), "{msg}");
+    }
+
+    #[test]
+    fn leaving_the_simplex_names_the_step_that_has_to_shrink() {
+        // The value alone does not tell the caller what to change, so the
+        // message carries the time step that produced it.
+        let msg = SimError::LeftTheSimplex {
+            strategy: 1,
+            value: -3.25,
+            time_step: 2.0,
+        }
+        .to_string();
+        assert!(msg.contains("strategy 1"), "{msg}");
+        assert!(msg.contains("-3.25"), "{msg}");
         assert!(msg.contains('2'), "{msg}");
     }
 

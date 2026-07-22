@@ -41,16 +41,6 @@ pub struct WellMixedBuilder {
 }
 
 impl WellMixedBuilder {
-    /// Slack allowed when checking that the initial shares sum to 1.
-    ///
-    /// Shares are written by hand or moved by a slider, and whether they sum
-    /// to exactly 1 in binary floating point depends on the order they happen
-    /// to be added in - `0.7 + 0.2 + 0.1` does not, while `0.1 + 0.2 + 0.7`
-    /// does. An exact comparison would reject honest input for reasons the
-    /// caller cannot see. This is loose enough for accumulated rounding over
-    /// a few hundred strategies and far tighter than any real mistake.
-    pub const SHARE_SUM_TOLERANCE: f64 = 1e-9;
-
     /// Default strength of selection: strong enough that the better strategy
     /// usually wins a comparison, weak enough to leave visible noise.
     pub const DEFAULT_SELECTION_STRENGTH: f64 = 1.0;
@@ -147,34 +137,14 @@ impl WellMixedBuilder {
         }
 
         let shares = match self.initial_shares {
-            Some(shares) => shares,
-            None => vec![1.0 / strategy_count as f64; strategy_count],
+            Some(values) => Shares::checked(values, strategy_count)?,
+            None => Shares::uniform(strategy_count),
         };
-        if shares.len() != strategy_count {
-            return Err(SimError::ShareCountMismatch {
-                found: shares.len(),
-                expected: strategy_count,
-            });
-        }
-
-        let mut sum = 0.0;
-        for (strategy, &value) in shares.iter().enumerate() {
-            if !value.is_finite() || value < 0.0 {
-                return Err(SimError::InvalidShare { strategy, value });
-            }
-            sum += value;
-        }
-        if (sum - 1.0).abs() > Self::SHARE_SUM_TOLERANCE {
-            return Err(SimError::SharesNotNormalised {
-                sum,
-                tolerance: Self::SHARE_SUM_TOLERANCE,
-            });
-        }
 
         let matches_per_agent =
             NonZeroUsize::new(self.matches_per_agent).ok_or(SimError::NoMatches)?;
 
-        let strategies = allocate_population(self.population, &shares);
+        let strategies = allocate_population(self.population, shares.as_slice());
 
         let mut sim = WellMixed {
             game: self.game,

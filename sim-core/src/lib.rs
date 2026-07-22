@@ -14,13 +14,16 @@
 pub mod error;
 pub mod game;
 pub mod prelude;
+pub mod replicator;
 pub mod rng;
+pub mod shares;
 pub mod types;
 pub mod wellmixed;
 
 use crate::error::SimError;
 use crate::game::{Game, HawkDove};
 use crate::prelude::*;
+use crate::replicator::{Replicator, ReplicatorBuilder};
 use crate::wellmixed::{WellMixed, WellMixedBuilder};
 use wasm_bindgen::prelude::*;
 
@@ -186,6 +189,134 @@ fn configure_hawk_dove(
         builder = builder.matches_per_agent(matches);
     }
     builder.build()
+}
+
+/// The analytic Hawk-Dove trajectory, driven from JavaScript.
+///
+/// A thin shell over [`Replicator`], the deterministic curve the UI overlays
+/// on a [`WellMixedSim`] run. Its history has the identical layout, so the two
+/// `Float64Array`s are plotted against each other without reshaping either.
+///
+/// # Independence
+///
+/// This shares no state with `WellMixedSim` or with another `ReplicatorSim`:
+/// each owns its own game and its own buffers, and nothing in the crate is
+/// static or global. Two runs on screen at once cannot perturb each other, and
+/// neither takes a seed, because there is nothing stochastic here to seed.
+///
+/// # Lifetime
+///
+/// Like every wasm object here, this owns memory the JavaScript garbage
+/// collector does not track, so the frontend must call `free()` when a run is
+/// discarded.
+#[wasm_bindgen]
+pub struct ReplicatorSim {
+    inner: Replicator,
+}
+
+#[wasm_bindgen]
+impl ReplicatorSim {
+    /// Configures the analytic Hawk-Dove trajectory for resource value `v` and
+    /// fight cost `c`, starting from `initial_hawk_share`.
+    ///
+    /// Pass the same `v`, `c` and initial share as the agent-based run to get
+    /// the curve it should be compared against.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `JsError` describing what was rejected: a `v`/`c` pair that
+    /// is not finite, or a hawk share outside `[0, 1]`.
+    pub fn hawk_dove(
+        v: f64,
+        c: f64,
+        initial_hawk_share: f64,
+    ) -> Result<ReplicatorSim, JsError> {
+        configure_hawk_dove_ode(v, c, initial_hawk_share)
+            .map(|inner| Self { inner })
+            .map_err(|error| {
+                JsError::new(&describe("could not configure the trajectory", &error))
+            })
+    }
+
+    /// Advances the trajectory by one step of `dt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `JsError` if `dt` is not finite and positive, or if it is too
+    /// large for this game, in which case the trajectory is left untouched and
+    /// the message names the step that has to shrink.
+    pub fn step(&mut self, dt: f64) -> Result<(), JsError> {
+        self.inner.step(dt).map_err(|error| {
+            JsError::new(&describe("could not integrate a step", &error))
+        })
+    }
+
+    /// Advances the trajectory by `steps` steps of `dt`, growing the history
+    /// once rather than a row at a time.
+    ///
+    /// This is how the overlay is computed: one call per parameter change,
+    /// rather than a step per animation frame.
+    ///
+    /// # Errors
+    ///
+    /// As [`step`], leaving the trajectory at the last state that was on the
+    /// simplex.
+    ///
+    /// [`step`]: ReplicatorSim::step
+    pub fn run(&mut self, steps: usize, dt: f64) -> Result<(), JsError> {
+        self.inner.run(steps, dt).map_err(|error| {
+            JsError::new(&describe("could not integrate the run", &error))
+        })
+    }
+
+    /// Returns how many steps have been integrated.
+    pub fn generation(&self) -> u32 {
+        self.inner.generation().get()
+    }
+
+    /// Returns the number of strategies, which is the stride of the
+    /// trajectory.
+    pub fn strategy_count(&self) -> usize {
+        self.inner.game().strategy_count()
+    }
+
+    /// Returns how many steps the trajectory holds, one more than the number
+    /// integrated.
+    pub fn recorded_generations(&self) -> usize {
+        self.inner.recorded_generations()
+    }
+
+    /// Returns the whole trajectory as a `Float64Array`, flat and
+    /// generation-major, in the layout [`WellMixedSim::share_history`]
+    /// documents - including the copy-not-view reasoning, which applies here
+    /// for the same reason.
+    pub fn share_history(&self) -> Vec<f64> {
+        self.inner.share_history().to_vec()
+    }
+
+    /// Returns the current state, indexed by strategy: hawk first, then dove.
+    pub fn current_shares(&self) -> Vec<f64> {
+        self.inner.current_shares().to_vec()
+    }
+}
+
+/// Builds the trajectory from the parameters JavaScript supplies.
+///
+/// Separate from the exported method, and returning a typed [`SimError`], for
+/// the same reason as [`configure_hawk_dove`]: `JsError` panics outside wasm,
+/// so everything except the wrap is tested on the host.
+fn configure_hawk_dove_ode(
+    v: f64,
+    c: f64,
+    initial_hawk_share: f64,
+) -> Result<Replicator, SimError> {
+    let game = Game::try_from(HawkDove { v, c })?;
+
+    // A share outside [0, 1] makes the dove share negative, which the builder
+    // rejects by name, so no separate check is needed here.
+    ReplicatorBuilder::new(game)
+        .initial_shares(vec![initial_hawk_share, 1.0 - initial_hawk_share])
+        .build()
 }
 
 /// Renders a typed error as the message JavaScript will see.
@@ -395,6 +526,83 @@ mod tests {
         assert_eq!(run(7), run(7));
         assert_ne!(run(7), run(8));
     }
+
+    fn default_trajectory() -> ReplicatorSim {
+        let inner = configure_hawk_dove_ode(2.0, 4.0, 0.5)
+            .expect("the curated default must always build");
+        ReplicatorSim { inner }
+    }
+
+    #[test]
+    fn the_trajectory_starts_where_the_run_it_overlays_starts() {
+        let ode = default_trajectory();
+
+        assert_eq!(ode.strategy_count(), 2);
+        assert_eq!(ode.generation(), 0);
+        assert_eq!(ode.recorded_generations(), 1);
+        assert_eq!(ode.current_shares(), [0.5, 0.5]);
+    }
+
+    #[test]
+    fn the_two_sims_hand_out_histories_in_the_same_layout() {
+        // The whole point of the ODE export: the UI reads both buffers with
+        // one stride and no reshaping. Same generation count, same stride,
+        // same first row.
+        let steps = 12;
+        let mut run = default_run();
+        let mut ode = default_trajectory();
+        for _ in 0..steps {
+            run.step().expect("a generation runs");
+        }
+        ode.run(steps, 0.01).expect("the trajectory integrates");
+
+        assert_eq!(ode.strategy_count(), run.strategy_count());
+        assert_eq!(ode.recorded_generations(), run.recorded_generations());
+        assert_eq!(ode.share_history().len(), run.share_history().len());
+        assert_eq!(&ode.share_history()[..2], &run.share_history()[..2]);
+    }
+
+    #[test]
+    fn the_trajectory_converges_to_v_over_c_across_the_boundary() {
+        let mut ode = default_trajectory();
+
+        ode.run(5_000, 0.01).expect("the trajectory integrates");
+
+        let hawks = ode.current_shares()[0];
+        assert!((hawks - 0.5).abs() < 1e-9, "V/C = 0.5, measured {hawks}");
+    }
+
+    #[test]
+    fn the_two_sims_share_no_state() {
+        // Each export owns its own game and buffers, so stepping one cannot
+        // move the other. Worth pinning: a static or shared cache here would
+        // only show up as two runs on screen influencing each other.
+        let mut first = default_trajectory();
+        let second = default_trajectory();
+        let mut run = default_run();
+
+        first.run(100, 0.01).expect("the trajectory integrates");
+        run.step().expect("a generation runs");
+
+        assert_eq!(second.current_shares(), [0.5, 0.5]);
+        assert_eq!(second.recorded_generations(), 1);
+    }
+
+    #[test]
+    fn an_invalid_trajectory_configuration_is_rejected_with_its_cause() {
+        let error = configure_hawk_dove_ode(f64::NAN, 4.0, 0.5)
+            .expect_err("a non-finite payoff cannot make a game");
+        let message = describe("could not configure the trajectory", &error);
+
+        assert!(message.contains("not finite"), "{message}");
+        assert!(configure_hawk_dove_ode(2.0, 4.0, 1.5).is_err());
+        assert!(configure_hawk_dove_ode(2.0, 4.0, -0.2).is_err());
+    }
+
+    // A bad time step is rejected by `Replicator` itself, which is where that
+    // test lives: the failure path of an exported method returns a `JsError`,
+    // and constructing one on the host panics, so it is only reachable in a
+    // browser. That is the same reason `configure_hawk_dove_ode` exists.
 
     #[test]
     fn core_version_reports_crate_version() {
