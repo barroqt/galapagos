@@ -33,9 +33,18 @@
 .stage {
   display: flex;
   min-height: 24rem;
+  padding: var(--space-3);
   background: var(--surface-inset);
   border: 1px solid var(--line-hairline);
   border-radius: var(--radius-md);
+}
+
+/* The canvas is sized by the well and by nothing else; the chart reads its
+   own box and manages the device-pixel backing store itself. */
+.chart {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 .rail {

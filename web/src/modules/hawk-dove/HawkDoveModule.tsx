@@ -7,6 +7,7 @@
  * in 2b.8, and the readout strip becomes the proper live numbers in 2b.9.
  */
 import { createMemo, onCleanup, onMount, Show, type JSX } from "solid-js";
+import { ShareChart } from "../../charts/shareChart";
 import { WellMixedRun, type HawkDoveParams } from "../../core";
 import { RunDriver } from "../../sim/driver";
 import { strategySeries } from "../../styles/palette";
@@ -35,20 +36,38 @@ const DEFAULT_PARAMS: HawkDoveParams = {
 /** Offered speeds, in generations per frame. */
 const SPEEDS = [1, 4, 16, 64] as const;
 
+/**
+ * The chart draws the hawk share alone. With two strategies the dove share is
+ * exactly its complement, so a second line would add ink and no information;
+ * the readouts carry the number.
+ */
+const CHARTED = [HAWK] as const;
+
 export function HawkDoveModule(): JSX.Element {
+  let canvas: HTMLCanvasElement | undefined;
+  let chart: ShareChart | null = null;
+
   const driver = new RunDriver({
     create: () => WellMixedRun.create(DEFAULT_PARAMS),
-    // The chart takes this over in 2b.6. Until then the readouts are driven by
-    // the generation signal, so there is nothing to paint.
-    draw: () => {},
+    // One arrow, created with the driver: the chart is looked up from a field
+    // rather than closed over, because it does not exist until the canvas is
+    // in the document.
+    draw: (run) => {
+      chart?.draw(run.history);
+    },
   });
 
   onMount(() => {
+    if (canvas !== undefined) {
+      chart = new ShareChart(canvas, { series: CHARTED });
+    }
     driver.play();
   });
-  // The whole unmount contract for this module: one call that cancels the
-  // frame loop and frees the WASM run.
+  // The whole unmount contract for this module: the chart stops observing its
+  // canvas, and one call cancels the frame loop and frees the WASM run.
   onCleanup(() => {
+    chart?.dispose();
+    chart = null;
     driver.dispose();
   });
 
@@ -77,7 +96,7 @@ export function HawkDoveModule(): JSX.Element {
 
       <div class={styles.body}>
         <div class={styles.stage}>
-          <p class={styles.pending}>Share chart</p>
+          <canvas class={styles.chart} ref={canvas} />
         </div>
 
         <aside class={styles.rail}>
