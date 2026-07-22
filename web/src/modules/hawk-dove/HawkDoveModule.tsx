@@ -6,10 +6,22 @@
  * 2b.6, the full parameter panel replaces the transport controls in the rail
  * in 2b.8, and the readout strip becomes the proper live numbers in 2b.9.
  */
-import { createMemo, onCleanup, onMount, Show, type JSX } from "solid-js";
+import {
+  createMemo,
+  createSignal,
+  onCleanup,
+  onMount,
+  Show,
+  type JSX,
+} from "solid-js";
 import { ShareChart } from "../../charts/shareChart";
-import { WellMixedRun, type HawkDoveParams } from "../../core";
+import {
+  ReplicatorTrajectory,
+  WellMixedRun,
+  type HawkDoveParams,
+} from "../../core";
 import { RunDriver } from "../../sim/driver";
+import { dtPerGeneration, type TimeMappingParams } from "../../sim/timeMapping";
 import { strategySeries } from "../../styles/palette";
 import styles from "./HawkDoveModule.module.css";
 
@@ -21,17 +33,35 @@ const HAWK = 0;
 const DOVE = 1;
 
 /**
- * The curated default: V < C, so there is an interior equilibrium at V/C =
- * 0.5, and a population large enough to read a trend in but small enough to
- * stay visibly noisy. 2b.8 puts these under the sliders.
+ * The curated default. 2b.8 puts these under the sliders.
+ *
+ * - `V < C`, so there is an interior equilibrium at `V/C = 0.5` to converge to.
+ * - The run starts at 90% hawks, away from that equilibrium, because a run
+ *   that starts on the answer has nothing to show. Hawks dominant, fighting
+ *   costly, and the share falls back to half: that is the whole idea in one
+ *   curve.
+ * - 500 agents: enough that the trend is legible, few enough that the noise a
+ *   finite population makes is visible against the analytic curve.
+ * - Selection strength 0.05 over 10 matches keeps `beta * m * dPi` at or below
+ *   0.5, which is the weak-selection regime where the replicator equation is
+ *   the run's deterministic limit. See `sim/timeMapping.ts`: this is the
+ *   parameter that decides whether the overlay is a prediction or a decoration.
  */
-const DEFAULT_PARAMS: HawkDoveParams = {
+const DEFAULT_PARAMS: HawkDoveParams & TimeMappingParams = {
   v: 2,
   c: 4,
   population: 500,
-  initialHawkShare: 0.5,
+  initialHawkShare: 0.9,
   seed: 42,
+  selectionStrength: 0.05,
+  matchesPerAgent: 10,
 };
+
+/** ODE time per generation, derived from the parameters above. */
+const DT = dtPerGeneration(DEFAULT_PARAMS);
+
+/** Generations of trajectory to have ready before the run needs them. */
+const INITIAL_HORIZON = 512;
 
 /** Offered speeds, in generations per frame. */
 const SPEEDS = [1, 4, 16, 64] as const;
@@ -46,6 +76,38 @@ const CHARTED = [HAWK] as const;
 export function HawkDoveModule(): JSX.Element {
   let canvas: HTMLCanvasElement | undefined;
   let chart: ShareChart | null = null;
+  const [overlayFailure, setOverlayFailure] = createSignal<string | null>(null);
+
+  /**
+   * The analytic overlay. Built once, from the same V, C and starting share as
+   * the run, and integrated ahead of it rather than recomputed per frame: it
+   * is deterministic, so a reset does not change it and neither does a step.
+   */
+  const trajectory = ReplicatorTrajectory.create(DEFAULT_PARAMS);
+  let horizonFailed = false;
+
+  /**
+   * Integrates further ahead when the run catches up with the trajectory,
+   * doubling the horizon each time so a long run costs a handful of
+   * extensions rather than one per frame.
+   */
+  const extendTrajectory = (generation: number): void => {
+    if (horizonFailed || generation < trajectory.generation) {
+      return;
+    }
+    const target = Math.max(
+      INITIAL_HORIZON,
+      generation + 1,
+      trajectory.generation * 2,
+    );
+    try {
+      trajectory.integrate(target - trajectory.generation, DT);
+    } catch (error) {
+      // Stop trying rather than failing once per frame from here on.
+      horizonFailed = true;
+      setOverlayFailure(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const driver = new RunDriver({
     create: () => WellMixedRun.create(DEFAULT_PARAMS),
@@ -53,7 +115,8 @@ export function HawkDoveModule(): JSX.Element {
     // rather than closed over, because it does not exist until the canvas is
     // in the document.
     draw: (run) => {
-      chart?.draw(run.history);
+      extendTrajectory(run.generation);
+      chart?.draw(run.history, trajectory.history);
     },
   });
 
@@ -61,14 +124,16 @@ export function HawkDoveModule(): JSX.Element {
     if (canvas !== undefined) {
       chart = new ShareChart(canvas, { series: CHARTED });
     }
+    extendTrajectory(0);
     driver.play();
   });
   // The whole unmount contract for this module: the chart stops observing its
-  // canvas, and one call cancels the frame loop and frees the WASM run.
+  // canvas, and the driver and the trajectory each free their WASM object.
   onCleanup(() => {
     chart?.dispose();
     chart = null;
     driver.dispose();
+    trajectory.dispose();
   });
 
   const shareOf = (strategy: number): number => {
@@ -77,10 +142,10 @@ export function HawkDoveModule(): JSX.Element {
   };
   const failure = createMemo(() => {
     const error = driver.error();
-    if (error === null) {
-      return null;
+    if (error !== null) {
+      return error instanceof Error ? error.message : String(error);
     }
-    return error instanceof Error ? error.message : String(error);
+    return overlayFailure();
   });
 
   return (

@@ -1,5 +1,6 @@
 /**
- * The share chart: strategy shares over the whole run, drawn on a 2D canvas.
+ * The share chart: strategy shares over the whole run, drawn on a 2D canvas,
+ * with the analytic replicator trajectory overlaid on the same axes.
  *
  * Imperative on purpose. It is handed a canvas and driven from the run
  * driver's frame callback, so the reactive layer never sees a redraw and the
@@ -24,6 +25,13 @@
  * the noise visible - decimating by sampling every nth generation would thin
  * the band as the run got longer and quietly make a noisy run look calm.
  *
+ * # The overlay
+ *
+ * The analytic trajectory is drawn against the *run's* x axis, one ODE step
+ * per generation (see `sim/timeMapping.ts`), so the two are compared at equal
+ * index and no resampling happens here. It is lighter, dashed and unbanded:
+ * it is a prediction, not a measurement.
+ *
  * # The y axis
  *
  * Pinned to [0, 1] always. These are shares of a population; an axis that
@@ -46,6 +54,19 @@ const SERIES_WIDTH = 2;
 const GLOW_WIDTH = 7;
 const GLOW_ALPHA = 0.14;
 const BAND_ALPHA = 0.22;
+const OVERLAY_WIDTH = 1.5;
+
+/** Hoisted: `setLineDash` takes an array, and building one per frame allocates. */
+const SOLID: number[] = [];
+const DASHED: number[] = [6, 5];
+
+interface SeriesStyle {
+  readonly stroke: string;
+  readonly glow: string | null;
+  readonly band: string | null;
+  readonly dash: number[];
+  readonly width: number;
+}
 
 interface Chrome {
   readonly grid: string;
@@ -77,6 +98,7 @@ export class ShareChart {
   #height = 0;
   #chrome: Chrome;
   #last: ShareHistory | null = null;
+  #lastOverlay: ShareHistory | null = null;
 
   /**
    * Per-column summaries, sized to the plot width and reused across frames and
@@ -87,10 +109,9 @@ export class ShareChart {
   #columnMax = new Float32Array(0);
   #columnMean = new Float32Array(0);
 
-  /** Style strings per strategy, built once: building them per frame allocates. */
-  readonly #stroke: string[] = [];
-  readonly #glow: string[] = [];
-  readonly #band: string[] = [];
+  /** Styles per strategy, built once: building them per frame allocates. */
+  readonly #runStyle: SeriesStyle[] = [];
+  readonly #overlayStyle: SeriesStyle[] = [];
 
   constructor(canvas: HTMLCanvasElement, options: ShareChartOptions = {}) {
     const context = canvas.getContext("2d");
@@ -108,11 +129,13 @@ export class ShareChart {
   }
 
   /**
-   * Draws a history. Safe to call every frame; safe to call with the same
-   * history twice.
+   * Draws a run, and optionally the analytic trajectory to compare it with.
+   *
+   * Safe to call every frame, and safe to call twice with the same histories.
    */
-  draw(history: ShareHistory): void {
+  draw(history: ShareHistory, overlay: ShareHistory | null = null): void {
     this.#last = history;
+    this.#lastOverlay = overlay;
     this.#render();
   }
 
@@ -120,6 +143,7 @@ export class ShareChart {
   dispose(): void {
     this.#observer.disconnect();
     this.#last = null;
+    this.#lastOverlay = null;
   }
 
   readonly #onResize = (): void => {
@@ -169,24 +193,43 @@ export class ShareChart {
     }
     this.#ensureStyles(history.strategyCount);
 
-    const generations = history.recordedGenerations;
+    // The run sets the x scale; the overlay is drawn against it, so a
+    // trajectory integrated further ahead than the run is simply cut off at
+    // today rather than squeezing the whole chart.
+    const span = Math.max(1, history.recordedGenerations - 1);
     const count = this.#series?.length ?? history.strategyCount;
+    const overlay = this.#lastOverlay;
+
     for (let index = 0; index < count; index += 1) {
       const strategy = this.#series?.[index] ?? index;
       if (strategy >= history.strategyCount) {
         continue;
       }
-      if (generations > plotWidth) {
-        this.#drawDecimated(history, strategy, plotWidth, plotHeight);
-      } else {
-        this.#drawExact(history, strategy, plotWidth, plotHeight);
+      this.#drawSeries(
+        history,
+        strategy,
+        span,
+        plotWidth,
+        plotHeight,
+        this.#runStyle[strategy],
+      );
+      if (overlay !== null && strategy < overlay.strategyCount) {
+        this.#drawSeries(
+          overlay,
+          strategy,
+          span,
+          plotWidth,
+          plotHeight,
+          this.#overlayStyle[strategy],
+        );
       }
     }
-    this.#drawGenerationLabel(generations - 1, plotWidth, plotHeight);
+    this.#drawGenerationLabel(span, plotWidth, plotHeight);
   }
 
   #drawGrid(plotWidth: number, plotHeight: number): void {
     const ctx = this.#context;
+    ctx.setLineDash(SOLID);
     ctx.lineWidth = 1;
     ctx.strokeStyle = this.#chrome.grid;
     ctx.beginPath();
@@ -215,18 +258,61 @@ export class ShareChart {
     }
   }
 
+  /**
+   * Draws one strategy of one history against the run's x axis, exactly when
+   * the generations fit in the plot's columns and as a decimated band when
+   * they do not.
+   */
+  #drawSeries(
+    history: ShareHistory,
+    strategy: number,
+    span: number,
+    plotWidth: number,
+    plotHeight: number,
+    style: SeriesStyle,
+  ): void {
+    // Never past the run's own last generation: the overlay may be integrated
+    // ahead of it, and drawing that would claim to show the future.
+    const generations = Math.min(history.recordedGenerations, span + 1);
+    if (generations === 0) {
+      return;
+    }
+    if (generations > plotWidth) {
+      this.#drawDecimated(
+        history,
+        strategy,
+        generations,
+        span,
+        plotWidth,
+        plotHeight,
+        style,
+      );
+    } else {
+      this.#drawExact(
+        history,
+        strategy,
+        generations,
+        span,
+        plotWidth,
+        plotHeight,
+        style,
+      );
+    }
+  }
+
   /** One point per generation, while they still fit in the plot's columns. */
   #drawExact(
     history: ShareHistory,
     strategy: number,
+    generations: number,
+    span: number,
     plotWidth: number,
     plotHeight: number,
+    style: SeriesStyle,
   ): void {
     const ctx = this.#context;
     const data = history.data;
     const stride = history.strategyCount;
-    const generations = history.recordedGenerations;
-    const span = Math.max(1, generations - 1);
 
     ctx.beginPath();
     for (let g = 0; g < generations; g += 1) {
@@ -238,7 +324,7 @@ export class ShareChart {
         ctx.lineTo(x, y);
       }
     }
-    this.#strokeSeries(strategy);
+    this.#strokeSeries(style);
   }
 
   /**
@@ -248,21 +334,28 @@ export class ShareChart {
   #drawDecimated(
     history: ShareHistory,
     strategy: number,
+    generations: number,
+    span: number,
     plotWidth: number,
     plotHeight: number,
+    style: SeriesStyle,
   ): void {
     const ctx = this.#context;
     const data = history.data;
     const stride = history.strategyCount;
-    const generations = history.recordedGenerations;
-    const columns = Math.min(this.#columnMin.length, Math.floor(plotWidth));
-    if (columns === 0) {
-      return;
-    }
+    // Columns cover this history's share of the run's x axis, so a shorter
+    // overlay stops where its data stops.
+    const columns = Math.min(
+      this.#columnMin.length,
+      Math.max(1, Math.round((generations / (span + 1)) * plotWidth)),
+    );
 
     for (let column = 0; column < columns; column += 1) {
       const from = Math.floor((column * generations) / columns);
-      const to = Math.max(from + 1, Math.floor(((column + 1) * generations) / columns));
+      const to = Math.max(
+        from + 1,
+        Math.floor(((column + 1) * generations) / columns),
+      );
       let min = Number.POSITIVE_INFINITY;
       let max = Number.NEGATIVE_INFINITY;
       let sum = 0;
@@ -281,24 +374,27 @@ export class ShareChart {
       this.#columnMean[column] = sum / (to - from);
     }
 
-    // The band: forward along the maxima, back along the minima.
-    ctx.beginPath();
-    for (let column = 0; column < columns; column += 1) {
-      const x = PAD_LEFT + column;
-      const y = PAD_TOP + (1 - this.#columnMax[column]) * plotHeight;
-      if (column === 0) {
-        ctx.moveTo(x, y);
-      } else {
-        ctx.lineTo(x, y);
+    if (style.band !== null) {
+      // The band: forward along the maxima, back along the minima.
+      ctx.beginPath();
+      for (let column = 0; column < columns; column += 1) {
+        const x = PAD_LEFT + column;
+        const y = PAD_TOP + (1 - this.#columnMax[column]) * plotHeight;
+        if (column === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
       }
+      for (let column = columns - 1; column >= 0; column -= 1) {
+        const x = PAD_LEFT + column;
+        ctx.lineTo(x, PAD_TOP + (1 - this.#columnMin[column]) * plotHeight);
+      }
+      ctx.closePath();
+      ctx.setLineDash(SOLID);
+      ctx.fillStyle = style.band;
+      ctx.fill();
     }
-    for (let column = columns - 1; column >= 0; column -= 1) {
-      const x = PAD_LEFT + column;
-      ctx.lineTo(x, PAD_TOP + (1 - this.#columnMin[column]) * plotHeight);
-    }
-    ctx.closePath();
-    ctx.fillStyle = this.#band[strategy];
-    ctx.fill();
 
     ctx.beginPath();
     for (let column = 0; column < columns; column += 1) {
@@ -310,24 +406,29 @@ export class ShareChart {
         ctx.lineTo(x, y);
       }
     }
-    this.#strokeSeries(strategy);
+    this.#strokeSeries(style);
   }
 
   /** A wide, faint pass under a thin solid one: the glow, without a filter. */
-  #strokeSeries(strategy: number): void {
+  #strokeSeries(style: SeriesStyle): void {
     const ctx = this.#context;
     ctx.lineJoin = "round";
     ctx.lineCap = "round";
-    ctx.lineWidth = GLOW_WIDTH;
-    ctx.strokeStyle = this.#glow[strategy];
+    if (style.glow !== null) {
+      ctx.setLineDash(SOLID);
+      ctx.lineWidth = GLOW_WIDTH;
+      ctx.strokeStyle = style.glow;
+      ctx.stroke();
+    }
+    ctx.setLineDash(style.dash);
+    ctx.lineWidth = style.width;
+    ctx.strokeStyle = style.stroke;
     ctx.stroke();
-    ctx.lineWidth = SERIES_WIDTH;
-    ctx.strokeStyle = this.#stroke[strategy];
-    ctx.stroke();
+    ctx.setLineDash(SOLID);
   }
 
   #drawGenerationLabel(
-    generation: number,
+    span: number,
     plotWidth: number,
     plotHeight: number,
   ): void {
@@ -339,16 +440,31 @@ export class ShareChart {
     ctx.textAlign = "left";
     ctx.fillText("0", PAD_LEFT, y);
     ctx.textAlign = "right";
-    ctx.fillText(`generation ${generation}`, PAD_LEFT + plotWidth, y);
+    ctx.fillText(`generation ${span}`, PAD_LEFT + plotWidth, y);
   }
 
-  /** Builds the per-strategy style strings the first time they are needed. */
+  /** Builds the per-strategy styles the first time they are needed. */
   #ensureStyles(strategyCount: number): void {
-    for (let strategy = this.#stroke.length; strategy < strategyCount; strategy += 1) {
+    for (
+      let strategy = this.#runStyle.length;
+      strategy < strategyCount;
+      strategy += 1
+    ) {
       const color = strategySeries(strategy);
-      this.#stroke.push(color.hex);
-      this.#glow.push(seriesRgba(color, GLOW_ALPHA));
-      this.#band.push(seriesRgba(color, BAND_ALPHA));
+      this.#runStyle.push({
+        stroke: color.hex,
+        glow: seriesRgba(color, GLOW_ALPHA),
+        band: seriesRgba(color, BAND_ALPHA),
+        dash: SOLID,
+        width: SERIES_WIDTH,
+      });
+      this.#overlayStyle.push({
+        stroke: color.analyticHex,
+        glow: null,
+        band: null,
+        dash: DASHED,
+        width: OVERLAY_WIDTH,
+      });
     }
   }
 }
